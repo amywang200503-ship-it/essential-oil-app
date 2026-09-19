@@ -4,6 +4,36 @@ export const isSameMonth = (date: string, today: string) => date.slice(0, 7) ===
 export const currentStock = (item: InventoryRecord) => item.inbound - item.outbound
 export const availableStock = (item: InventoryRecord) => currentStock(item) - item.reserved
 const daysUntil = (date: string, today: string) => Math.ceil((new Date(`${date}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime()) / 86400000)
+
+/** 数据中心统一日期区间（YYYY-MM-DD，闭区间，包含 start 与 end）。 */
+export type DateRange = { start: string; end: string }
+/** 数据中心统计周期选项（与 DataCenter 顶部 6 个按钮一致，单一来源）。 */
+export type AnalyticsPeriod = '今日' | '本周' | '本月' | '本季度' | '今年' | '自定义'
+const pad2 = (value: number) => String(value).padStart(2, '0')
+const toLocalDate = (date: string) => new Date(`${date}T00:00:00`)
+const formatDate = (date: Date) => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`
+const isValidDateString = (date: string | undefined): date is string => {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false
+  return !Number.isNaN(toLocalDate(date).getTime())
+}
+const shiftDays = (date: string, days: number) => { const value = toLocalDate(date); value.setDate(value.getDate() + days); return formatDate(value) }
+
+/** 按统计周期计算闭区间 [start, end]；end 统一为 today，自定义无合法区间或 today 非法时安全回退为 [today, today]。 */
+export const getAnalyticsDateRange = (period: AnalyticsPeriod, today: string, customRange?: DateRange): DateRange => {
+  if (period === '自定义' && isValidDateString(customRange?.start) && isValidDateString(customRange?.end)) return { start: customRange.start, end: customRange.end }
+  if (!isValidDateString(today)) return { start: today, end: today }
+  switch (period) {
+    case '今日': return { start: today, end: today }
+    case '本周': return { start: shiftDays(today, -((toLocalDate(today).getDay() + 6) % 7)), end: today }
+    case '本月': return { start: `${today.slice(0, 7)}-01`, end: today }
+    case '本季度': return { start: `${today.slice(0, 4)}-${pad2(Math.floor((Number(today.slice(5, 7)) - 1) / 3) * 3 + 1)}-01`, end: today }
+    case '今年': return { start: `${today.slice(0, 4)}-01-01`, end: today }
+    default: return { start: today, end: today }
+  }
+}
+
+/** 判断 YYYY-MM-DD 是否落在闭区间内（字符串比较，不依赖系统当前时间，缺失/非法日期返回 false）。 */
+export const isWithinDateRange = (date: string | undefined, range: DateRange): boolean => isValidDateString(date) && isValidDateString(range.start) && isValidDateString(range.end) && date >= range.start && date <= range.end
 const orderTotal = (order: Order) => order.quantity * order.price + order.freight + order.tax
 
 export const selectTotalCustomers = (state: AppState) => state.customers.length
@@ -85,7 +115,7 @@ export const selectDailySales = (state: AppState, days = 7): { date: string; amo
   }
   return dates.map((date) => ({ date, amount: byDate.get(date) ?? 0 }))
 }
-export const selectAverageOrderValue = (state: AppState) => state.orders.length ? state.orders.reduce((sum, order) => sum + orderTotal(order), 0) / state.orders.length : 0
+export const selectAverageOrderValue = (state: AppState) => { const validOrders = state.orders.filter((order) => order.status !== '已取消'); return validOrders.length ? validOrders.reduce((sum, order) => sum + orderTotal(order), 0) / validOrders.length : 0 }
 
 export const selectTopCustomers = (state: AppState) => state.customers.map((customer) => ({ ...customer, orderCount: state.orders.filter((order) => order.customerId === customer.id).length })).sort((a, b) => b.amount - a.amount)
 
@@ -114,7 +144,8 @@ export const selectCustomerStats = (state: AppState, customerId: string): Custom
   }
 }
 export const selectTopProducts = (state: AppState) => state.products.map((product) => { const orders = state.orders.filter((order) => order.productId === product.id); return { ...product, orderCount: orders.length, quantity: orders.reduce((sum, order) => sum + order.quantity, 0), sales: orders.reduce((sum, order) => sum + orderTotal(order), 0) } }).sort((a, b) => b.sales - a.sales)
-export const selectSalesFunnel = (state: AppState) => ({ customers: state.customers.length, inquiries: state.quotes.length + state.samples.length, samples: state.samples.length, quotes: state.quotes.length, orders: state.orders.length, completedOrders: selectCompletedOrders(state).length })
+/** 销售漏斗：系统没有独立可靠的“询价记录”数据源，故不提供 inquiries（不使用报价数 + 样品数伪造询价数量）。 */
+export const selectSalesFunnel = (state: AppState) => ({ customers: state.customers.length, samples: state.samples.length, quotes: state.quotes.length, orders: state.orders.length, completedOrders: selectCompletedOrders(state).length })
 export const selectProductDocumentCompleteness = (state: AppState, productId: string) => { const required = ['COA', 'SDS', 'TDS', '规格书', '批次资料']; const available = state.productDocuments.filter((document) => document.productId === productId).map((document) => document.type); return Math.round(required.filter((type) => available.includes(type)).length / required.length * 100) }
 export const selectPendingTasks = (state: AppState) => ({ followUps: selectPendingFollowUps(state), lowStock: selectLowStockProducts(state), samples: selectPendingSamples(state), quotes: selectPendingQuotes(state), payments: selectPendingPayments(state), shipments: selectPendingShipments(state) })
 
