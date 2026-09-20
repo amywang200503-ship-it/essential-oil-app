@@ -66,6 +66,9 @@ const mapInventoryItems = (inventory: StoreInventoryRecord[], products: StorePro
   })
 }
 
+/** 实时库存（唯一来源 state.inventory）：按 productId 汇总 inbound - outbound。 */
+const stockFromInventory = (inventory: StoreInventoryRecord[], productId: string) => inventory.filter((item) => item.productId === productId).reduce((sum, item) => sum + item.inbound - item.outbound, 0)
+
 const parseSafetyText = (safety: string | undefined): number | undefined => {
   if (!safety) return undefined
   const match = String(safety).match(/\d+(\.\d+)?/)
@@ -206,8 +209,8 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
       return
     }
     consumption.forEach((item) => {
-      dispatch({ type: 'STOCK_OUT', payload: { inventoryId: item.inventoryId, quantity: item.quantity } })
       dispatch({ type: 'RELEASE_STOCK', payload: { inventoryId: item.inventoryId, quantity: item.quantity } })
+      dispatch({ type: 'STOCK_OUT', payload: { inventoryId: item.inventoryId, quantity: item.quantity } })
     })
     const shipped = selected.shipped + amount
     const updated = {
@@ -290,7 +293,7 @@ const quoteFilters = ['全部', '草稿', '待发送', '待确认', '已接受',
 type FormulaIngredient = { id: number; name: string; category: string; ratio: number; unit: string; price: number; stock: number; tone: string }
 type Formula = { id: string; name: string; purpose: string; total: number; unit: string; status: string; version: string; updated: string; ingredients: FormulaIngredient[] }
 
-const toAppFormulas = (formulas: StoreFormula[], products: Product[]): Formula[] =>
+const toAppFormulas = (formulas: StoreFormula[], products: Product[], inventory: StoreInventoryRecord[]): Formula[] =>
   formulas.map((formula) => ({
     ...formula,
     ingredients: formula.ingredients.map((ingredient, index) => {
@@ -302,7 +305,7 @@ const toAppFormulas = (formulas: StoreFormula[], products: Product[]): Formula[]
         ratio: ingredient.ratio,
         unit: 'g',
         price: ingredient.price,
-        stock: product?.stock ?? 0,
+        stock: stockFromInventory(inventory, ingredient.productId),
         tone: product?.tone ?? 'sage',
       }
     }),
@@ -472,7 +475,7 @@ function DocField({ label, value }: { label: string; value: string }) { return <
 function DocumentForm({ onClose, onSubmit }: { onClose: () => void; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void }) { const { state } = useAppStore(); return <div className="modal-backdrop"><form className="document-form" onSubmit={onSubmit}><div className="form-head"><div><span className="section-kicker">NEW DOCUMENT</span><h2>新增资料</h2><p>暂不上传真实文件，先建立资料索引。</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><div className="form-grid"><label className="form-field"><span>资料名称<i>*</i></span><input name="name" required placeholder="如：阿甘油检测报告" /></label><label className="form-field"><span>资料类型<i>*</i></span><select name="type"><option>COA</option><option>SDS</option><option>TDS</option><option>规格书</option><option>检测报告</option><option>原产地资料</option><option>批次资料</option></select></label><label className="form-field"><span>关联产品<i>*</i></span><select name="product">{state.products.map((item) => <option key={item.id}>{item.name}</option>)}</select></label><label className="form-field"><span>关联批次</span><input name="batch" placeholder="如：ARG20260801" /></label><label className="form-field"><span>文件编号</span><input name="fileNo" placeholder="如：COA-20260801" /></label><label className="form-field"><span>版本号</span><input name="version" defaultValue="V1.0" /></label><label className="form-field"><span>发布日期</span><input name="publish" type="date" defaultValue={state.settings.simulatedToday} /></label><label className="form-field"><span>有效期</span><input name="expiry" type="date" /></label><label className="form-field"><span>资料状态</span><select name="status"><option>已上传</option><option>待完善</option></select></label></div><label className="form-field full-field"><span>备注</span><textarea name="note" placeholder="补充资料说明..." /></label></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button className="primary-button" type="submit">保存资料　→</button></div></form></div> }
 function FormulaLab({ onBack }: { onBack: () => void }) {
   const { state, dispatch } = useAppStore()
-  const [formulas, setFormulas] = useState<Formula[]>(() => toAppFormulas(state.formulas, state.products))
+  const [formulas, setFormulas] = useState<Formula[]>(() => toAppFormulas(state.formulas, state.products, state.inventory))
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState('全部')
   const [editing, setEditing] = useState<Formula | null>(null)
@@ -496,11 +499,11 @@ function FormulaEditor({ formula, onBack, onSave, onCopy, onDelete, notify }: { 
   const [unit, setUnit] = useState(formula?.unit || 'g')
   const [status, setStatus] = useState(formula?.status || '草稿')
   const [version, setVersion] = useState(formula?.version || 'V1.0')
-  const [ingredients, setIngredients] = useState<FormulaIngredient[]>(formula?.ingredients ?? state.products.slice(0, 4).map((product, index) => ({ id: index + 1, name: product.name, category: product.category, ratio: [60, 30, 8, 2][index] ?? 0, unit: 'g', price: product.price, stock: product.stock, tone: product.tone })))
+  const [ingredients, setIngredients] = useState<FormulaIngredient[]>(formula?.ingredients ?? state.products.slice(0, 4).map((product, index) => ({ id: index + 1, name: product.name, category: product.category, ratio: [60, 30, 8, 2][index] ?? 0, unit: 'g', price: product.price, stock: stockFromInventory(state.inventory, product.id), tone: product.tone })))
   const ratioTotal = ingredients.reduce((sum, item) => sum + (Number(item.ratio) || 0), 0)
   const totalCost = ingredients.reduce((sum, item) => sum + (Number(item.ratio) || 0) * total / 100 * item.price / 1000, 0)
   const valid = Boolean(name.trim()) && ingredients.length > 0 && Math.abs(ratioTotal - 100) < 0.001 && total > 0
-  const addIngredient = (event: React.ChangeEvent<HTMLSelectElement>) => { const product = state.products.find((candidate) => candidate.name === event.target.value); if (product && !ingredients.some((current) => current.name === product.name)) setIngredients((current) => [...current, { id: Date.now(), name: product.name, category: product.category, ratio: 0, unit: 'g', price: product.price, stock: product.stock, tone: product.tone }]); event.target.value = '' }
+  const addIngredient = (event: React.ChangeEvent<HTMLSelectElement>) => { const product = state.products.find((candidate) => candidate.name === event.target.value); if (product && !ingredients.some((current) => current.name === product.name)) setIngredients((current) => [...current, { id: Date.now(), name: product.name, category: product.category, ratio: 0, unit: 'g', price: product.price, stock: stockFromInventory(state.inventory, product.id), tone: product.tone }]); event.target.value = '' }
   const updateRatio = (id: number, value: string) => setIngredients((current) => current.map((item) => item.id === id ? { ...item, ratio: Number(value) || 0 } : item))
   const save = () => { if (!valid) return; onSave({ id: formula?.id || `F${state.settings.simulatedToday.replace(/-/g, '')}${String(Date.now()).slice(-3)}`, name, purpose, total, unit, status, version, updated: state.settings.simulatedToday, ingredients }) }
   return <div className="formula-page formula-editor-page"><div className="editor-top"><button className="back-link" onClick={onBack}>← 返回配方列表</button><div className="editor-actions"><button className="secondary-button" onClick={onCopy}>复制配方</button>{formula && <button className="danger-text" onClick={onDelete}>删除配方</button>}<button className="primary-button" disabled={!valid} onClick={save}>保存配方　→</button></div></div><div className="editor-title"><div><div className="eyebrow">{formula ? `配方档案 · ${formula.id}` : 'NEW FORMULA · 新建配方'}</div><h1>{name || '未命名配方'}</h1><p>先定义配方信息，再通过原料比例计算重量与成本。</p></div><span className={`editor-validity ${Math.abs(ratioTotal - 100) < 0.001 ? 'valid' : 'invalid'}`}>{Math.abs(ratioTotal - 100) < 0.001 ? '✓ 配方比例正确' : `比例为 ${ratioTotal.toFixed(2).replace(/\.00$/, '')}%，${ratioTotal < 100 ? `还差 ${(100 - ratioTotal).toFixed(2).replace(/\.00$/, '')}%` : '必须调整至100%后才能保存'}`}</span></div><div className="editor-layout"><div><section className="editor-card"><div className="editor-card-head"><span className="section-kicker">01 · FORMULA INFO</span><h2>配方信息</h2></div><div className="form-grid"><label className="form-field"><span>配方名称<i>*</i></span><input value={name} onChange={(event) => setName(event.target.value)} placeholder="如：熟龄肌护理油" /></label><label className="form-field"><span>配方编号</span><input value={formula?.id || '保存后自动生成'} readOnly /></label><label className="form-field"><span>配方用途</span><select value={purpose} onChange={(event) => setPurpose(event.target.value)}>{formulaPurposes.slice(1).map((item) => <option key={item}>{item}</option>)}</select></label><label className="form-field"><span>当前状态</span><select value={status} onChange={(event) => setStatus(event.target.value)}><option>草稿</option><option>实验中</option><option>已完成</option><option>已停用</option></select></label><label className="form-field"><span>总制作量<i>*</i></span><input type="number" min="0" value={total} onChange={(event) => setTotal(Number(event.target.value))} /></label><label className="form-field"><span>单位</span><select value={unit} onChange={(event) => setUnit(event.target.value)}><option>g</option><option>kg</option><option>ml</option><option>%</option></select></label></div></section><section className="editor-card ingredient-card"><div className="editor-card-head ingredient-heading"><div><span className="section-kicker">02 · INGREDIENTS</span><h2>原料配比</h2></div><select className="add-ingredient" onChange={addIngredient} defaultValue=""><option value="" disabled>＋ 添加原料</option>{state.products.map((item) => <option key={item.id}>{item.name}</option>)}</select></div><div className="ingredient-head-row"><span>原料名称</span><span>分类</span><span>添加比例</span><span>计算重量</span><span>单价 / KG</span><span>原料成本</span><span /></div>{ingredients.map((item) => { const weight = total * item.ratio / 100; const cost = weight * item.price / 1000; return <div className="ingredient-row" key={item.id}><div className="ingredient-name"><div className={`mini-ingredient ${item.tone}`}>✦</div><div><b>{item.name}</b><small>库存 {item.stock} KG</small></div></div><span className="ingredient-category">{item.category}</span><label className="ratio-input"><input type="number" min="0" max="100" step="0.01" value={item.ratio} onChange={(event) => updateRatio(item.id, event.target.value)} /><b>%</b></label><strong className="ingredient-weight">{weight.toFixed(2).replace(/\.00$/, '')} {unit}</strong><span className="ingredient-price">¥{item.price.toLocaleString()} / KG</span><strong className="ingredient-cost">¥{cost.toFixed(2)}</strong><button className="remove-ingredient" onClick={() => setIngredients((current) => current.filter((candidate) => candidate.id !== item.id))}>×</button></div> })}<div className="ratio-footer"><span>当前总比例</span><b>{ratioTotal.toFixed(2).replace(/\.00$/, '')}%</b><span>剩余比例</span><b className={ratioTotal > 100 ? 'over' : ''}>{(100 - ratioTotal).toFixed(2).replace(/\.00$/, '')}%</b></div>{ingredients.some((item) => total * item.ratio / 100 > item.stock * 1000) && <div className="formula-stock-warning">! 当前库存不足，无法满足该配方用量。配方暂不扣减库存。</div>}</section></div><aside><section className="cost-card"><span className="section-kicker">03 · COST</span><h2>成本核算</h2><div className="cost-total"><small>原料总成本</small><b>¥{totalCost.toFixed(2)}</b></div><div><span>每 100g 成本</span><b>¥{(totalCost / (total / 100)).toFixed(2)}</b></div><div><span>每 1kg 成本</span><b>¥{(totalCost / (total / 1000)).toFixed(2)}</b></div><p>成本根据原料重量与采购单价实时计算。</p></section><section className="version-card"><span className="section-kicker">04 · VERSION</span><h2>配方版本</h2><div className="version-line"><b>{version}</b><span>当前版本</span></div><div className="version-options"><button className={version === 'V1.0' ? 'active' : ''} onClick={() => setVersion('V1.0')}>V1.0</button><button className={version === 'V1.1' ? 'active' : ''} onClick={() => setVersion('V1.1')}>V1.1</button><button className={version === 'V2.0' ? 'active' : ''} onClick={() => setVersion('V2.0')}>V2.0</button></div><button className="new-version" onClick={() => { setVersion('V1.1'); notify('已创建新版本 V1.1，旧版本保持不变') }}>＋ 创建新版本</button></section></aside></div></div>
@@ -564,8 +567,8 @@ function SampleManagement({ onBack }: { onBack: () => void }) {
         showNotice(sample.batch ? `批次 ${sample.batch} 不存在，无法寄出样品` : '未找到可用库存批次，无法寄出样品')
         return
       }
-      if (record.inbound - record.outbound < sample.quantity) {
-        showNotice(`批次 ${record.batch} 库存不足（可用 ${record.inbound - record.outbound} KG），无法寄出样品`)
+      if (record.inbound - record.outbound - record.reserved < sample.quantity) {
+        showNotice(`批次 ${record.batch} 可用库存不足（可用 ${record.inbound - record.outbound - record.reserved} KG，已预占 ${record.reserved} KG），无法寄出样品`)
         return
       }
       dispatch({ type: 'STOCK_OUT', payload: { inventoryId: record.id, quantity: sample.quantity } })
@@ -765,8 +768,9 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
         showNotice('未找到可出库的库存')
         return
       }
-      if (record.inbound - record.outbound < amount) {
-        showNotice(`批次 ${record.batch} 库存不足，当前 ${record.inbound - record.outbound} KG`)
+      const recordAvailable = record.inbound - record.outbound - record.reserved
+      if (recordAvailable < amount) {
+        showNotice(`批次 ${record.batch} 可用库存不足，当前可用 ${recordAvailable} KG（已预占 ${record.reserved} KG）`)
         return
       }
       dispatch({ type: 'STOCK_OUT', payload: { inventoryId: record.id, quantity: amount, date: date || undefined } })
@@ -841,6 +845,8 @@ function ProductCenter({ onBack }: { onBack: () => void }) {
   const [showForm, setShowForm] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [notice, setNotice] = useState('')
+  const productInUse = (productId: string) => state.inventory.some((item) => item.productId === productId) || state.orders.some((item) => item.productId === productId) || state.quotes.some((item) => item.productId === productId) || state.samples.some((item) => item.productId === productId) || state.formulas.some((formula) => formula.ingredients.some((ingredient) => ingredient.productId === productId))
   const [form, setForm] = useState({ name: '', en: '', inci: '', category: '精油', source: '', part: '', method: '', origin: '', spec: '', moq: '', safety: '', note: '' })
 
   const filteredProducts = products.filter((product) => {
@@ -852,9 +858,9 @@ function ProductCenter({ onBack }: { onBack: () => void }) {
   const saveProduct = (event: React.FormEvent) => {
     event.preventDefault()
     if (!form.name || !form.en) return
-    const product = { name: form.name, en: form.en, inci: form.inci || form.en, category: form.category, source: form.source || '待补充', part: form.part || '待补充', method: form.method || '待补充', origin: form.origin || '待补充', spec: form.spec || '待补充', moq: form.moq || '待补充', safety: form.safety || '0 KG', stock: 0, batch: '待生成', price: 0, tone: 'sage' }
-    if (editingId) dispatch({ type: 'UPDATE_PRODUCT', payload: { id: editingId, changes: product } })
-    else dispatch({ type: 'ADD_PRODUCT', payload: { ...product, id: `product-${Date.now()}` } })
+    const editable = { name: form.name, en: form.en, inci: form.inci || form.en, category: form.category, source: form.source || '待补充', part: form.part || '待补充', method: form.method || '待补充', origin: form.origin || '待补充', spec: form.spec || '待补充', moq: form.moq || '待补充', safety: form.safety || '0 KG' }
+    if (editingId) dispatch({ type: 'UPDATE_PRODUCT', payload: { id: editingId, changes: editable } })
+    else dispatch({ type: 'ADD_PRODUCT', payload: { ...editable, stock: 0, batch: '待生成', price: 0, tone: 'sage', id: `product-${Date.now()}` } })
     setShowForm(false)
     setEditingId(null)
     setSaved(true)
@@ -863,7 +869,7 @@ function ProductCenter({ onBack }: { onBack: () => void }) {
   }
 
   const selected = products.find((product) => product.id === selectedId)
-  if (selected) return <ProductDetail product={selected} currentStock={productsWithStock.find((p) => p.id === selected.id)?.currentStock ?? 0} onBack={() => setSelectedId(null)} onEdit={() => { setEditingId(selected.id); setForm({ name: selected.name, en: selected.en, inci: selected.inci, category: selected.category, source: selected.source, part: selected.part, method: selected.method, origin: selected.origin, spec: selected.spec, moq: selected.moq, safety: selected.safety, note: '' }); setShowForm(true) }} onDelete={() => { if (window.confirm('确定删除该产品吗？')) { dispatch({ type: 'DELETE_PRODUCT', payload: { id: selected.id } }); setSelectedId(null) } }} />
+  if (selected) return <ProductDetail product={selected} currentStock={productsWithStock.find((p) => p.id === selected.id)?.currentStock ?? 0} onBack={() => setSelectedId(null)} onEdit={() => { setEditingId(selected.id); setForm({ name: selected.name, en: selected.en, inci: selected.inci, category: selected.category, source: selected.source, part: selected.part, method: selected.method, origin: selected.origin, spec: selected.spec, moq: selected.moq, safety: selected.safety, note: '' }); setShowForm(true) }} onDelete={() => { if (!window.confirm('确定删除该产品吗？')) return; if (productInUse(selected.id)) { setNotice('该产品已有库存或业务记录，不能删除。如需停用，请保留产品。'); window.setTimeout(() => setNotice(''), 3200); return } dispatch({ type: 'DELETE_PRODUCT', payload: { id: selected.id } }); setSelectedId(null) }} />
 
   return <div className="product-page">
     <div className="product-page-head"><div><button className="back-link" onClick={onBack}>← 返回工作台</button><div className="eyebrow">产品资产 · PRODUCT CATALOG</div><h1>产品中心</h1><p>统一管理原料信息、库存状态与商业资料。</p></div><button className="primary-button" onClick={() => { setEditingId(null); setForm({ name: '', en: '', inci: '', category: '精油', source: '', part: '', method: '', origin: '', spec: '', moq: '', safety: '', note: '' }); setShowForm(true) }}>＋ 新增产品</button></div>
@@ -872,6 +878,7 @@ function ProductCenter({ onBack }: { onBack: () => void }) {
     <div className="catalog-table"><div className="catalog-table-head"><span>产品信息</span><span>分类</span><span>产地</span><span>库存</span><span>库存状态</span><span>操作</span></div>{filteredProducts.length ? filteredProducts.map((product) => { const stock = productsWithStock.find((p) => p.id === product.id)?.currentStock ?? 0; return <article className="catalog-row" key={product.id}><div className="catalog-product"><div className={`product-thumb ${product.tone}`}><span>{product.category === '天然泥粉' ? '◈' : '✦'}</span></div><div><b>{product.name}</b><small>{product.en}</small><em>INCI · {product.inci}</em></div></div><span className="catalog-category">{product.category}</span><span className="catalog-origin"><i />{product.origin}</span><span className="catalog-stock"><b>{stock}</b> KG</span><span className={`stock-status ${stock <= 10 ? 'stock-low' : 'stock-good'}`}><i />{stock <= 10 ? '库存不足' : '库存充足'}</span><div className="catalog-actions"><button onClick={() => setSelectedId(product.id)}>查看详情 <span>→</span></button><button onClick={() => onBack()}>创建报价</button></div></article>}) : <div className="empty-catalog"><span>⌕</span><b>没有找到匹配的产品</b><small>试试其他名称、INCI 或产地关键词</small></div>}</div>
     <div className="catalog-footer"><span>显示 1 - {filteredProducts.length} 条，共 {filteredProducts.length} 条</span><div><button disabled>‹</button><button className="page-current">1</button><button disabled>›</button></div></div>
     {saved && <div className="toast">✓ 产品已添加到产品中心</div>}
+    {notice && <div className="toast">! {notice}</div>}
     {showForm && <ProductForm form={form} updateForm={updateForm} onClose={() => setShowForm(false)} onSubmit={saveProduct} />}
   </div>
 }

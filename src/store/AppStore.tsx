@@ -440,11 +440,18 @@ function parseProductSafety(safety: string | undefined): number | undefined {
   return match ? Number(match[0]) : undefined
 }
 
+const isProductInUse = (state: AppState, productId: string): boolean =>
+  state.inventory.some((item) => item.productId === productId)
+  || state.orders.some((item) => item.productId === productId)
+  || state.quotes.some((item) => item.productId === productId)
+  || state.samples.some((item) => item.productId === productId)
+  || state.formulas.some((formula) => formula.ingredients.some((ingredient) => ingredient.productId === productId))
+
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'ADD_PRODUCT': return { ...state, products: [...state.products, action.payload] }
     case 'UPDATE_PRODUCT': return { ...state, products: updateById(state.products, action.payload.id, action.payload.changes) }
-    case 'DELETE_PRODUCT': return { ...state, products: state.products.filter((item) => item.id !== action.payload.id) }
+    case 'DELETE_PRODUCT': return isProductInUse(state, action.payload.id) ? state : { ...state, products: state.products.filter((item) => item.id !== action.payload.id) }
     case 'ADD_CUSTOMER': return { ...state, customers: [...state.customers, action.payload] }
     case 'UPDATE_CUSTOMER': return { ...state, customers: updateById(state.customers, action.payload.id, action.payload.changes) }
     case 'ADD_PRODUCT_DRAFT': return { ...state, productDrafts: [action.payload, ...state.productDrafts] }
@@ -472,6 +479,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'STOCK_OUT': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      if (action.payload.quantity <= 0) return state
+      if (action.payload.quantity > record.inbound - record.outbound - record.reserved) return state
       const date = action.payload.date || state.settings.simulatedToday
       return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { date, type: 'outbound', quantity: action.payload.quantity }), outbound: record.outbound + action.payload.quantity, outboundDate: date }) }
     }
