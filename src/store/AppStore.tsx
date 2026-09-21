@@ -325,13 +325,13 @@ export type AppAction =
   | { type: 'ADD_LEAD_CANDIDATE'; payload: LeadCandidate }
   | { type: 'UPDATE_LEAD_CANDIDATE'; payload: { id: string; changes: Partial<LeadCandidate> } }
   | { type: 'REMOVE_LEAD_CANDIDATE'; payload: { id: string } }
-  | { type: 'STOCK_IN'; payload: { inventoryId: string; quantity: number; date?: string } }
+  | { type: 'STOCK_IN'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string } }
   | { type: 'STOCK_OUT'; payload: { inventoryId: string; quantity: number; date?: string } }
   | { type: 'RESERVE_STOCK'; payload: { inventoryId: string; quantity: number } }
   | { type: 'RELEASE_STOCK'; payload: { inventoryId: string; quantity: number } }
   | { type: 'ADJUST_STOCK'; payload: { inventoryId: string; quantity: number; date?: string } }
   | { type: 'SET_SAFETY_STOCK'; payload: { inventoryId: string; safetyStock: number } }
-  | { type: 'ADD_INVENTORY_BATCH'; payload: { id?: string; productId: string; productName: string; category: string; batch: string; inbound: number; outbound?: number; inboundDate: string; outboundDate?: string; expiry?: string; safetyStock?: number } }
+  | { type: 'ADD_INVENTORY_BATCH'; payload: { id?: string; productId: string; productName: string; category: string; batch: string; inbound: number; outbound?: number; inboundDate: string; outboundDate?: string; expiry?: string; safetyStock?: number; transactionId?: string } }
   | { type: 'UPDATE_INVENTORY_BATCH'; payload: { inventoryId: string; changes: Partial<Pick<InventoryRecord, 'productName' | 'category' | 'batch' | 'inboundDate' | 'outboundDate' | 'expiry' | 'safetyStock'>> } }
   | { type: 'ADD_FORMULA'; payload: Formula }
   | { type: 'UPDATE_FORMULA'; payload: { id: string; changes: Partial<Formula> } }
@@ -473,8 +473,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'STOCK_IN': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      // 防重复提交：同一 transactionId 只累加一次（复用既有可选字段 eventId，未改数据结构）
+      if (action.payload.transactionId && record.timeline?.some((event) => event.eventId === action.payload.transactionId)) return state
       const date = action.payload.date || state.settings.simulatedToday
-      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { date, type: 'inbound', quantity: action.payload.quantity }), inbound: record.inbound + action.payload.quantity, inboundDate: date }) }
+      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { eventId: action.payload.transactionId, date, type: 'inbound', quantity: action.payload.quantity }), inbound: record.inbound + action.payload.quantity, inboundDate: date }) }
     }
     case 'STOCK_OUT': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
@@ -513,6 +515,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'ADD_INVENTORY_BATCH': {
       const payload = action.payload
       if (payload.inbound < 0) return state
+      // 防重复提交：同一 transactionId 已在任意批次的时间线中出现则忽略本次新增
+      if (payload.transactionId && state.inventory.some((item) => item.timeline?.some((event) => event.eventId === payload.transactionId))) return state
       const id = uniqueInventoryId(payload.id ?? `inventory-${payload.productId.replace(/^product-/, '')}-${payload.batch}`, state.inventory)
       const inheritedSafety = state.inventory.find((item) => item.productId === payload.productId)?.safetyStock
         ?? parseProductSafety(state.products.find((product) => product.id === payload.productId)?.safety)
@@ -532,7 +536,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         expiry: payload.expiry ?? '',
         timeline: [],
       }
-      return { ...state, inventory: [...state.inventory, withInventoryEvent(record, createInventoryEvent(record, 'inbound', record.inbound, record.inboundDate))] }
+      return { ...state, inventory: [...state.inventory, withInventoryEvent(record, createInventoryEvent(record, 'inbound', record.inbound, record.inboundDate, payload.transactionId ? { eventId: payload.transactionId } : {}))] }
     }
     case 'UPDATE_INVENTORY_BATCH': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)

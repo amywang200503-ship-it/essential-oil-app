@@ -68,6 +68,9 @@ const mapInventoryItems = (inventory: StoreInventoryRecord[], products: StorePro
   })
 }
 
+/** FIFO：按入库日期升序返回某产品的批次（同日保持原顺序；返回新数组，不改动 state.inventory）。 */
+const fifoInboundRecords = (inventory: StoreInventoryRecord[], productId: string) => inventory.filter((item) => item.productId === productId).sort((a, b) => a.inboundDate.localeCompare(b.inboundDate))
+
 /** 实时库存（唯一来源 state.inventory）：按 productId 汇总 inbound - outbound。 */
 const stockFromInventory = (inventory: StoreInventoryRecord[], productId: string) => inventory.filter((item) => item.productId === productId).reduce((sum, item) => sum + item.inbound - item.outbound, 0)
 
@@ -565,7 +568,8 @@ function SampleManagement({ onBack }: { onBack: () => void }) {
   const changeStatus = (sample: Sample, status: string, event: string) => {
     if (status === '已寄出' && sample.status !== '已寄出') {
       const exactMatch = sample.batch ? state.inventory.find((record) => record.productId === sample.productId && record.batch === sample.batch) : undefined
-      const fifoRecord = sample.batch ? undefined : state.inventory.filter((record) => record.productId === sample.productId).sort((a, b) => a.inboundDate.localeCompare(b.inboundDate)).find((record) => record.inbound - record.outbound - record.reserved > 0)
+      const fifoRecords = fifoInboundRecords(state.inventory, sample.productId)
+      const fifoRecord = sample.batch ? undefined : (fifoRecords.find((record) => record.inbound - record.outbound - record.reserved >= sample.quantity) ?? fifoRecords.find((record) => record.inbound - record.outbound - record.reserved > 0))
       const record = exactMatch ?? fifoRecord
       if (!record) {
         showNotice(sample.batch ? `批次 ${sample.batch} 不存在，无法寄出样品` : '未找到可用库存批次，无法寄出样品')
@@ -741,13 +745,14 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
     if (amount <= 0) return
     const name = product.name
     const batch = String(data.get('batch') || '')
+    const transactionId = String(data.get('transactionId') || '')
     const productId = product.id
     const productRecords = state.inventory.filter((item) => item.productId === productId)
     const existingBatch = productRecords.find((item) => item.batch === batch)
     const date = String(data.get('date') || '')
     if (transaction === 'inbound') {
       if (existingBatch) {
-        dispatch({ type: 'STOCK_IN', payload: { inventoryId: existingBatch.id, quantity: amount, date: date || undefined } })
+        dispatch({ type: 'STOCK_IN', payload: { inventoryId: existingBatch.id, quantity: amount, date: date || undefined, transactionId: transactionId || undefined } })
       } else if (productId) {
         dispatch({
           type: 'ADD_INVENTORY_BATCH',
@@ -759,6 +764,7 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
             inbound: amount,
             inboundDate: date || state.settings.simulatedToday,
             expiry: String(data.get('expiry') || ''),
+            transactionId: transactionId || undefined,
           },
         })
       }
@@ -771,7 +777,10 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
         showNotice(`批次 ${batch} 不存在，出库已取消`)
         return
       }
-      const record = existingBatch ?? productRecords.reduce((a, b) => (b.inboundDate > a.inboundDate ? b : a), productRecords[0])
+      const fifoRecords = fifoInboundRecords(state.inventory, productId)
+      const record = existingBatch
+        ?? fifoRecords.find((item) => item.inbound - item.outbound - item.reserved >= amount)
+        ?? fifoRecords.find((item) => item.inbound - item.outbound - item.reserved > 0)
       if (!record) {
         showNotice('未找到可出库的库存')
         return
@@ -820,7 +829,8 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
 function InventoryForm({ type, onClose, onSubmit }: { type: 'inbound' | 'outbound'; onClose: () => void; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void }) {
   const { state } = useAppStore()
   const inbound = type === 'inbound'
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="inventory-form" onSubmit={onSubmit}><div className="form-head"><div><span className="section-kicker">{inbound ? 'STOCK IN' : 'STOCK OUT'}</span><h2>{inbound ? '产品入库' : '产品出库'}</h2><p>{inbound ? '记录一笔新的原料入库，库存将自动增加。' : '记录一笔原料出库，库存将自动扣减。'}</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><div className="form-grid"><label className="form-field"><span>产品<i>*</i></span><select name="product" required>{state.products.length ? state.products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>) : inventoryData.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label><label className="form-field"><span>{inbound ? '批次号' : '批次'}<i>*</i></span><input name="batch" defaultValue={inbound ? 'ARG20260823' : 'ARG20260801'} required /></label><label className="form-field"><span>{inbound ? '入库数量' : '出库数量'}<i>*</i></span><input name="amount" type="number" min="0.01" step="0.01" placeholder="请输入数量" required /></label>{inbound && <label className="form-field"><span>单位</span><select name="unit"><option>KG</option><option>ML</option><option>桶</option></select></label>}<label className="form-field"><span>{inbound ? '入库日期' : '出库日期'}</span><input name="date" type="date" defaultValue={state.settings.simulatedToday} /></label><label className="form-field"><span>{inbound ? '供应商' : '客户'}</span><input name="partner" placeholder={inbound ? '请输入供应商名称' : '请输入客户名称'} /></label>{inbound && <label className="form-field"><span>采购成本</span><input name="cost" placeholder="如：680 / KG" /> </label>}{!inbound && <label className="form-field"><span>订单号</span><input name="order" placeholder="如：SO20260823" /></label>}{inbound && <label className="form-field"><span>保质期</span><input name="expiry" type="date" /></label>}</div><label className="form-field full-field"><span>备注</span><textarea name="note" placeholder="补充本次业务的信息..." /></label></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button type="submit" className="primary-button">确认{inbound ? '入库' : '出库'}　→</button></div></form></div>
+  const [transactionId] = useState(() => `TX-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><form className="inventory-form" onSubmit={onSubmit}><div className="form-head"><div><span className="section-kicker">{inbound ? 'STOCK IN' : 'STOCK OUT'}</span><h2>{inbound ? '产品入库' : '产品出库'}</h2><p>{inbound ? '记录一笔新的原料入库，库存将自动增加。' : '记录一笔原料出库，库存将自动扣减。'}</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><input type="hidden" name="transactionId" value={transactionId} /><div className="form-grid"><label className="form-field"><span>产品<i>*</i></span><select name="product" required>{state.products.length ? state.products.map((item) => <option key={item.id} value={item.id}>{item.name}</option>) : inventoryData.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label><label className="form-field"><span>{inbound ? '批次号' : '批次'}<i>*</i></span><input name="batch" defaultValue={inbound ? 'ARG20260823' : 'ARG20260801'} required /></label><label className="form-field"><span>{inbound ? '入库数量' : '出库数量'}<i>*</i></span><input name="amount" type="number" min="0.01" step="0.01" placeholder="请输入数量" required /></label>{inbound && <label className="form-field"><span>单位</span><select name="unit"><option>KG</option><option>ML</option><option>桶</option></select></label>}<label className="form-field"><span>{inbound ? '入库日期' : '出库日期'}</span><input name="date" type="date" defaultValue={state.settings.simulatedToday} /></label><label className="form-field"><span>{inbound ? '供应商' : '客户'}</span><input name="partner" placeholder={inbound ? '请输入供应商名称' : '请输入客户名称'} /></label>{inbound && <label className="form-field"><span>采购成本</span><input name="cost" placeholder="如：680 / KG" /> </label>}{!inbound && <label className="form-field"><span>订单号</span><input name="order" placeholder="如：SO20260823" /></label>}{inbound && <label className="form-field"><span>保质期</span><input name="expiry" type="date" /></label>}</div><label className="form-field full-field"><span>备注</span><textarea name="note" placeholder="补充本次业务的信息..." /></label></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button type="submit" className="primary-button">确认{inbound ? '入库' : '出库'}　→</button></div></form></div>
 }
 
 function SafetyForm({ item, onClose, onSubmit }: { item: InventoryItem; onClose: () => void; onSubmit: (event: React.FormEvent<HTMLFormElement>) => void }) { return <div className="modal-backdrop"><form className="small-form" onSubmit={onSubmit}><div className="form-head"><div><span className="section-kicker">SAFETY STOCK</span><h2>设置安全库存</h2><p>{item.name} · 当前库存 {item.inbound - item.outbound} KG</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><label className="form-field"><span>安全库存数量（KG）<i>*</i></span><input name="safety" type="number" min="0" defaultValue={item.safety} required /></label></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button type="submit" className="primary-button">保存设置　→</button></div></form></div> }
