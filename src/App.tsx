@@ -790,7 +790,7 @@ function InventoryManagement({ onBack }: { onBack: () => void }) {
         showNotice(`批次 ${record.batch} 可用库存不足，当前可用 ${recordAvailable} KG（已预占 ${record.reserved} KG）`)
         return
       }
-      dispatch({ type: 'STOCK_OUT', payload: { inventoryId: record.id, quantity: amount, date: date || undefined } })
+      dispatch({ type: 'STOCK_OUT', payload: { inventoryId: record.id, quantity: amount, date: date || undefined, transactionId: transactionId || undefined } })
       setTransaction(null)
       showNotice(`已出库 ${amount} KG，库存已更新`)
     }

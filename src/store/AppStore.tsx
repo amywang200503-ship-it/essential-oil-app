@@ -326,7 +326,7 @@ export type AppAction =
   | { type: 'UPDATE_LEAD_CANDIDATE'; payload: { id: string; changes: Partial<LeadCandidate> } }
   | { type: 'REMOVE_LEAD_CANDIDATE'; payload: { id: string } }
   | { type: 'STOCK_IN'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string } }
-  | { type: 'STOCK_OUT'; payload: { inventoryId: string; quantity: number; date?: string } }
+  | { type: 'STOCK_OUT'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string } }
   | { type: 'RESERVE_STOCK'; payload: { inventoryId: string; quantity: number } }
   | { type: 'RELEASE_STOCK'; payload: { inventoryId: string; quantity: number } }
   | { type: 'ADJUST_STOCK'; payload: { inventoryId: string; quantity: number; date?: string } }
@@ -481,10 +481,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'STOCK_OUT': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      // 防重复提交：同一 transactionId 只扣减一次（复用既有可选字段 eventId，未改数据结构）
+      if (action.payload.transactionId && record.timeline?.some((event) => event.eventId === action.payload.transactionId)) return state
       if (action.payload.quantity <= 0) return state
       if (action.payload.quantity > record.inbound - record.outbound - record.reserved) return state
       const date = action.payload.date || state.settings.simulatedToday
-      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { date, type: 'outbound', quantity: action.payload.quantity }), outbound: record.outbound + action.payload.quantity, outboundDate: date }) }
+      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { eventId: action.payload.transactionId, date, type: 'outbound', quantity: action.payload.quantity }), outbound: record.outbound + action.payload.quantity, outboundDate: date }) }
     }
     case 'RESERVE_STOCK': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
