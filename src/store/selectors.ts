@@ -218,6 +218,35 @@ export const selectQuoteStockStatus = (state: AppState, productId: string, unit:
   const mismatched = stockUnit !== '多单位' && stockUnit !== unit
   return { stockUnit, comparable: false, reason: mismatched ? 'unit-mismatch' : 'no-unit-stock' }
 }
+
+/**
+ * 有效期/到期判定的"基准今天"：取应用模拟日期与真实系统日期中较晚的一天。
+ * 目的：模拟日期只用于演示，业务到期判定不能滞后于现实日期（历史报价日期一律不改，只改判定口径）。
+ */
+export const resolveEffectiveToday = (simulatedToday: string): string => {
+  const now = new Date()
+  const realToday = formatDate(now)
+  if (!isValidDateString(simulatedToday)) return realToday
+  return simulatedToday > realToday ? simulatedToday : realToday
+}
+
+/** 报价有效期状态（复用既有口径：<0 已过期；<=1 明天到期；<=7 即将到期；其余无提示）。 */
+export type QuoteExpiryState = {
+  expired: boolean
+  days: number
+  label: string
+}
+
+export const quoteExpiryState = (validUntil: string, simulatedToday: string): QuoteExpiryState => {
+  const base = resolveEffectiveToday(simulatedToday)
+  if (!isValidDateString(validUntil) || !isValidDateString(base)) return { expired: false, days: Number.NaN, label: '' }
+  const days = Math.ceil((toLocalDate(validUntil).getTime() - toLocalDate(base).getTime()) / 86400000)
+  if (days < 0) return { expired: true, days, label: '报价已过期' }
+  if (days === 0) return { expired: false, days, label: '报价今天到期' }
+  if (days === 1) return { expired: false, days, label: '报价明天到期' }
+  if (days <= 7) return { expired: false, days, label: '报价即将到期' }
+  return { expired: false, days, label: '' }
+}
 export const selectInventoryByProduct = (state: AppState, productId: string) => state.inventory.filter((item) => item.productId === productId)
 export const selectInventoryByBatch = (state: AppState, batch: string) => state.inventory.filter((item) => item.batch === batch)
 export const selectPendingSamples = (state: AppState) => state.samples.filter((sample) => ['等待反馈', '已寄出', '已签收', '测试中'].includes(sample.status))
