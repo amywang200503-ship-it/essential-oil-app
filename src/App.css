@@ -361,3 +361,11 @@ hr {
     max-width: calc(100vw - 24px);
   }
 }
+/**
+ * 报价详情/列表：过期提示与按钮置灰（最小增量，样式仅作用于报价页面，位于媒体查询之外）
+ * - .quote-expiry.expired / .expiry-tag.expired：报价已过期时明显区分
+ * - disabled：沿用项目既有置灰色 #aebcad 与禁用光标
+ */
+.quote-expiry.expired,.quote-expiry.expired small,.expiry-tag.expired{color:#ba6e5b}
+.quote-detail-buttons .primary-button:disabled{background:#aebcad;box-shadow:none;cursor:not-allowed}
+.quote-next-actions button:disabled{background:#3c674e;opacity:.45;cursor:not-allowed}
