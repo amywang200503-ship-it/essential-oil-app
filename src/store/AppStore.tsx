@@ -189,6 +189,8 @@ export type Quote = {
   product: string
   quantity: number
   unit: string
+  /** 包装规格（自由文本，如 "1 KG / 25 KG"）；与计量单位 unit 分离，可选、向后兼容旧数据 */
+  spec?: string
   price: number
   freight: number
   tax: number

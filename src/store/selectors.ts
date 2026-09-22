@@ -192,6 +192,32 @@ export const selectProductTotalsByUnit = (state: AppState, productId: string): I
   }
   return Array.from(groups.values()).sort((a, b) => b.currentStock - a.currentStock || a.unit.localeCompare(b.unit))
 }
+
+/** 业务计量单位白名单（仅用于校验与表单选项渲染；本轮不做任何单位换算）。 */
+export const BUSINESS_UNITS = ['KG', 'ML', '桶'] as const
+/** 是否为受支持的计量单位（区别于包装规格自由文本）。 */
+export const isValidBusinessUnit = (unit: string): boolean => (BUSINESS_UNITS as readonly string[]).includes(unit)
+
+/**
+ * 报价库存判断（单位一致性前置）：
+ * - comparable=true 时 stock 为「与报价单位一致」的库存数量（同一单位内比较，永不跨单位、不换算）；
+ * - comparable=false 时不进行数值比较，reason 说明原因：
+ *   unit-mismatch = 产品库存单位与报价单位不一致；no-unit-stock = 该单位下没有库存。
+ */
+export type QuoteStockStatus = {
+  stockUnit: string
+  comparable: boolean
+  stock?: number
+  reason?: 'unit-mismatch' | 'no-unit-stock'
+}
+
+export const selectQuoteStockStatus = (state: AppState, productId: string, unit: string): QuoteStockStatus => {
+  const stockUnit = selectProductUnit(state, productId)
+  const group = selectProductTotalsByUnit(state, productId).find((item) => item.unit === unit)
+  if (group) return { stockUnit, comparable: true, stock: group.currentStock }
+  const mismatched = stockUnit !== '多单位' && stockUnit !== unit
+  return { stockUnit, comparable: false, reason: mismatched ? 'unit-mismatch' : 'no-unit-stock' }
+}
 export const selectInventoryByProduct = (state: AppState, productId: string) => state.inventory.filter((item) => item.productId === productId)
 export const selectInventoryByBatch = (state: AppState, batch: string) => state.inventory.filter((item) => item.batch === batch)
 export const selectPendingSamples = (state: AppState) => state.samples.filter((sample) => ['等待反馈', '已寄出', '已签收', '测试中'].includes(sample.status))
