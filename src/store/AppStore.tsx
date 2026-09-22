@@ -52,7 +52,8 @@ export type ProductDraft = {
  * - reserve 订单预占
  * - release 订单释放
  * - sample_out 样品扣减
- * eventId / productId / batch / referenceId / note 为可选元数据字段，向后兼容现有数据
+ * eventId / productId / batch / unit / referenceId / note 为可选元数据字段，向后兼容现有数据
+ * unit 为事件发生时的计量单位快照，缺失时按默认单位（KG）解释
  */
 export type InventoryEvent = {
   eventId?: string
@@ -61,6 +62,7 @@ export type InventoryEvent = {
   date: string
   type: 'inbound' | 'outbound' | 'adjust' | 'reserve' | 'release' | 'sample_out'
   quantity: number
+  unit?: string
   referenceId?: string
   note?: string
 }
@@ -71,6 +73,8 @@ export type InventoryEvent = {
  * - reservedStock = reserved（预占库存）
  * - availableStock = currentStock - reserved（派生值，见 selectors.availableStock）
  * - 库存状态：正常 / 低库存（currentStock < safetyStock）/ 临期（expiry 30 天内）
+ * - unit 为该批次计量单位（可选，缺失视为默认单位 KG，兼容历史数据）
+ * - unitCost 为采购单价（元/单位，可选），quantityPerUnit 为包装换算基数（如 1 桶 = 5 KG，可选）
  */
 export type InventoryRecord = {
   id: string
@@ -85,6 +89,9 @@ export type InventoryRecord = {
   inboundDate: string
   outboundDate: string
   expiry: string
+  unit?: string
+  unitCost?: number
+  quantityPerUnit?: number
   timeline?: InventoryEvent[]
 }
 
@@ -325,13 +332,13 @@ export type AppAction =
   | { type: 'ADD_LEAD_CANDIDATE'; payload: LeadCandidate }
   | { type: 'UPDATE_LEAD_CANDIDATE'; payload: { id: string; changes: Partial<LeadCandidate> } }
   | { type: 'REMOVE_LEAD_CANDIDATE'; payload: { id: string } }
-  | { type: 'STOCK_IN'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string } }
-  | { type: 'STOCK_OUT'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string } }
-  | { type: 'RESERVE_STOCK'; payload: { inventoryId: string; quantity: number } }
-  | { type: 'RELEASE_STOCK'; payload: { inventoryId: string; quantity: number } }
+  | { type: 'STOCK_IN'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string; unit?: string; unitCost?: number; quantityPerUnit?: number } }
+  | { type: 'STOCK_OUT'; payload: { inventoryId: string; quantity: number; date?: string; transactionId?: string; unit?: string } }
+  | { type: 'RESERVE_STOCK'; payload: { inventoryId: string; quantity: number; unit?: string } }
+  | { type: 'RELEASE_STOCK'; payload: { inventoryId: string; quantity: number; unit?: string } }
   | { type: 'ADJUST_STOCK'; payload: { inventoryId: string; quantity: number; date?: string } }
   | { type: 'SET_SAFETY_STOCK'; payload: { inventoryId: string; safetyStock: number } }
-  | { type: 'ADD_INVENTORY_BATCH'; payload: { id?: string; productId: string; productName: string; category: string; batch: string; inbound: number; outbound?: number; inboundDate: string; outboundDate?: string; expiry?: string; safetyStock?: number; transactionId?: string } }
+  | { type: 'ADD_INVENTORY_BATCH'; payload: { id?: string; productId: string; productName: string; category: string; batch: string; inbound: number; outbound?: number; inboundDate: string; outboundDate?: string; expiry?: string; safetyStock?: number; transactionId?: string; unit?: string; unitCost?: number; quantityPerUnit?: number } }
   | { type: 'UPDATE_INVENTORY_BATCH'; payload: { inventoryId: string; changes: Partial<Pick<InventoryRecord, 'productName' | 'category' | 'batch' | 'inboundDate' | 'outboundDate' | 'expiry' | 'safetyStock'>> } }
   | { type: 'ADD_FORMULA'; payload: Formula }
   | { type: 'UPDATE_FORMULA'; payload: { id: string; changes: Partial<Formula> } }
@@ -447,6 +454,12 @@ const isProductInUse = (state: AppState, productId: string): boolean =>
   || state.samples.some((item) => item.productId === productId)
   || state.formulas.some((formula) => formula.ingredients.some((ingredient) => ingredient.productId === productId))
 
+/**
+ * 批次计量单位（缺失时按默认 KG 解释，兼容历史数据）。
+ * 与 selectors.recordUnit 口径一致；因 selectors 依赖本文件类型，故此处本地实现以避免循环依赖。
+ */
+const inventoryRecordUnit = (record: InventoryRecord): string => record.unit || 'KG'
+
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'ADD_PRODUCT': return { ...state, products: [...state.products, action.payload] }
@@ -476,11 +489,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       // 防重复提交：同一 transactionId 只累加一次（复用既有可选字段 eventId，未改数据结构）
       if (action.payload.transactionId && record.timeline?.some((event) => event.eventId === action.payload.transactionId)) return state
       const date = action.payload.date || state.settings.simulatedToday
-      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { eventId: action.payload.transactionId, date, type: 'inbound', quantity: action.payload.quantity }), inbound: record.inbound + action.payload.quantity, inboundDate: date }) }
+      // 单位与采购成本：优先本次入参，其次沿用批次既有值，最终回退默认单位 KG；
+      // 成本/换算基数未提供时不写入，避免覆盖历史数据
+      const unit = action.payload.unit || record.unit || 'KG'
+      const unitCost = action.payload.unitCost || record.unitCost
+      const quantityPerUnit = action.payload.quantityPerUnit || record.quantityPerUnit
+      return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, { eventId: action.payload.transactionId, unit, date, type: 'inbound', quantity: action.payload.quantity }), inbound: record.inbound + action.payload.quantity, inboundDate: date, unit, ...(unitCost ? { unitCost } : {}), ...(quantityPerUnit ? { quantityPerUnit } : {}) }) }
     }
     case 'STOCK_OUT': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      // 单位守卫：显式传入单位时批次单位必须一致（不同单位不能直接扣减）；未传单位保持旧行为
+      if (action.payload.unit && inventoryRecordUnit(record) !== action.payload.unit) return state
       // 防重复提交：同一 transactionId 只扣减一次（复用既有可选字段 eventId，未改数据结构）
       if (action.payload.transactionId && record.timeline?.some((event) => event.eventId === action.payload.transactionId)) return state
       if (action.payload.quantity <= 0) return state
@@ -491,6 +511,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'RESERVE_STOCK': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      // 单位守卫：显式传入单位时批次单位必须一致（不做跨单位预占）；未传单位保持旧行为
+      if (action.payload.unit && inventoryRecordUnit(record) !== action.payload.unit) return state
       if (record.reserved + action.payload.quantity > record.inbound - record.outbound) return state
       const date = state.settings.simulatedToday
       return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, createInventoryEvent(record, 'reserve', action.payload.quantity, date)), reserved: record.reserved + action.payload.quantity }) }
@@ -498,6 +520,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'RELEASE_STOCK': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)
       if (!record) return state
+      // 单位守卫：显式传入单位时批次单位必须一致（释放预占同样不允许跨单位）；未传单位保持旧行为
+      if (action.payload.unit && inventoryRecordUnit(record) !== action.payload.unit) return state
       const date = state.settings.simulatedToday
       return { ...state, inventory: updateById(state.inventory, action.payload.inventoryId, { ...withInventoryEvent(record, createInventoryEvent(record, 'release', action.payload.quantity, date)), reserved: Math.max(0, record.reserved - action.payload.quantity) }) }
     }
@@ -536,9 +560,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         inboundDate: payload.inboundDate,
         outboundDate: payload.outboundDate ?? '',
         expiry: payload.expiry ?? '',
+        // 单位与采购成本（可选字段；单位缺失时按默认单位 KG 记录）
+        unit: payload.unit || 'KG',
+        unitCost: payload.unitCost || undefined,
+        quantityPerUnit: payload.quantityPerUnit || undefined,
         timeline: [],
       }
-      return { ...state, inventory: [...state.inventory, withInventoryEvent(record, createInventoryEvent(record, 'inbound', record.inbound, record.inboundDate, payload.transactionId ? { eventId: payload.transactionId } : {}))] }
+      return { ...state, inventory: [...state.inventory, withInventoryEvent(record, createInventoryEvent(record, 'inbound', record.inbound, record.inboundDate, { unit: record.unit, ...(payload.transactionId ? { eventId: payload.transactionId } : {}) }))] }
     }
     case 'UPDATE_INVENTORY_BATCH': {
       const record = state.inventory.find((item) => item.id === action.payload.inventoryId)

@@ -3,6 +3,53 @@ import type { AppState, Customer, InventoryRecord, Order, Product } from './AppS
 export const isSameMonth = (date: string, today: string) => date.slice(0, 7) === today.slice(0, 7)
 export const currentStock = (item: InventoryRecord) => item.inbound - item.outbound
 export const availableStock = (item: InventoryRecord) => currentStock(item) - item.reserved
+
+/** 库存默认计量单位：无 unit 的历史数据按此解释（不改变旧函数行为）。 */
+export const DEFAULT_INVENTORY_UNIT = 'KG'
+/** 批次计量单位：缺失时回退默认单位，兼容历史数据。 */
+export const recordUnit = (item: InventoryRecord): string => item.unit || DEFAULT_INVENTORY_UNIT
+/** 单位化库存文案，如 "72 KG"、"500 ML"、"20 桶"；unit 缺失时按默认单位展示。 */
+export const formatInventoryAmount = (amount: number, unit?: string): string => `${amount} ${unit || DEFAULT_INVENTORY_UNIT}`
+
+/**
+ * FIFO 候选批次（单位感知）：按 productId 过滤 →（可选）按计量单位过滤 → 按 inboundDate 升序。
+ * 传入 unit 时只返回同单位批次，杜绝 KG / ML / 桶 混入同一次数量分配；unit 缺省时等同于旧行为。
+ */
+export const getFifoInventoryRecords = (inventory: InventoryRecord[], productId: string, unit?: string): InventoryRecord[] =>
+  inventory
+    .filter((item) => item.productId === productId && (!unit || recordUnit(item) === unit))
+    .sort((a, b) => a.inboundDate.localeCompare(b.inboundDate))
+
+/** 单位感知 FIFO 分配结果（只使用同一单位的批次）。 */
+export type InventoryAllocation = { inventoryId: string; batch: string; quantity: number }
+
+/**
+ * 单位感知 FIFO 分配：只在 recordUnit 等于 unit 的批次之间按入库日期分配。
+ * remaining > 0 表示该单位库存不足，调用方必须提示并放弃（严禁用其它单位批次补足）。
+ */
+export const planFifoAllocation = (inventory: InventoryRecord[], productId: string, quantity: number, unit: string): { allocations: InventoryAllocation[]; remaining: number } => {
+  let remaining = quantity
+  const allocations: InventoryAllocation[] = []
+  for (const record of getFifoInventoryRecords(inventory, productId, unit)) {
+    if (remaining <= 0) break
+    const available = availableStock(record)
+    if (available <= 0) continue
+    const take = Math.min(available, remaining)
+    allocations.push({ inventoryId: record.id, batch: record.batch, quantity: take })
+    remaining -= take
+  }
+  return { allocations, remaining }
+}
+
+/** 预占单位校验：返回第一个与目标单位不一致的预占批次（无 unit 的历史批次按默认单位解释）。 */
+export const findReservationUnitMismatch = (inventory: InventoryRecord[], reservations: { inventoryId: string }[], unit: string): { batch: string; unit: string } | undefined => {
+  for (const reservation of reservations) {
+    const record = inventory.find((item) => item.id === reservation.inventoryId)
+    if (!record) continue
+    if (recordUnit(record) !== unit) return { batch: record.batch, unit: recordUnit(record) }
+  }
+  return undefined
+}
 const daysUntil = (date: string, today: string) => Math.ceil((new Date(`${date}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime()) / 86400000)
 
 /** 数据中心统一日期区间（YYYY-MM-DD，闭区间，包含 start 与 end）。 */
@@ -90,6 +137,61 @@ export const selectLowStockProducts = (state: AppState): InventoryRecord[] => {
 export const selectExpiringProducts = (state: AppState) => state.inventory.filter((item) => item.expiry && daysUntil(item.expiry, state.settings.simulatedToday) >= 0 && daysUntil(item.expiry, state.settings.simulatedToday) <= 30)
 export const selectTotalInventory = (state: AppState) => state.inventory.reduce((sum, item) => sum + currentStock(item), 0)
 export const selectAvailableStock = (state: AppState) => state.inventory.reduce((sum, item) => sum + availableStock(item), 0)
+
+/**
+ * 单位感知库存统计（按 unit 分组，不修改旧的 selectTotalInventory / selectAvailableStock 签名与行为）。
+ * 跨单位不做直接相加，避免 KG / ML / 桶 混算。
+ */
+export type InventoryUnitTotal = {
+  unit: string
+  currentStock: number
+  availableStock: number
+  batches: number
+}
+
+export const selectInventoryTotalsByUnit = (state: AppState): InventoryUnitTotal[] => {
+  const groups = new Map<string, InventoryUnitTotal>()
+  for (const item of state.inventory) {
+    const unit = recordUnit(item)
+    const group = groups.get(unit) ?? { unit, currentStock: 0, availableStock: 0, batches: 0 }
+    group.currentStock += currentStock(item)
+    group.availableStock += availableStock(item)
+    group.batches += 1
+    groups.set(unit, group)
+  }
+  return Array.from(groups.values()).sort((a, b) => b.currentStock - a.currentStock || a.unit.localeCompare(b.unit))
+}
+
+/** 库存总量文案（按单位分列，如 "100 KG · 500 ML"）；无库存记录时回退 "0 KG"。 */
+export const selectInventoryTotalLabel = (state: AppState): string => {
+  const totals = selectInventoryTotalsByUnit(state)
+  return totals.length ? totals.map((total) => formatInventoryAmount(total.currentStock, total.unit)).join(' · ') : formatInventoryAmount(0)
+}
+
+/**
+ * 某产品当前批次的计量单位：全部批次单位一致时返回该单位；
+ * 多批次单位混合时返回 '多单位'（不做跨单位换算）；无库存记录时回退默认单位。
+ */
+export const selectProductUnit = (state: AppState, productId: string): string => {
+  const units = Array.from(new Set(state.inventory.filter((item) => item.productId === productId).map((item) => recordUnit(item))))
+  if (!units.length) return DEFAULT_INVENTORY_UNIT
+  return units.length === 1 ? units[0] : '多单位'
+}
+
+/** 某产品各批次计量单位汇总（按单位分组，用于产品级单位感知展示）。 */
+export const selectProductTotalsByUnit = (state: AppState, productId: string): InventoryUnitTotal[] => {
+  const groups = new Map<string, InventoryUnitTotal>()
+  for (const item of state.inventory) {
+    if (item.productId !== productId) continue
+    const unit = recordUnit(item)
+    const group = groups.get(unit) ?? { unit, currentStock: 0, availableStock: 0, batches: 0 }
+    group.currentStock += currentStock(item)
+    group.availableStock += availableStock(item)
+    group.batches += 1
+    groups.set(unit, group)
+  }
+  return Array.from(groups.values()).sort((a, b) => b.currentStock - a.currentStock || a.unit.localeCompare(b.unit))
+}
 export const selectInventoryByProduct = (state: AppState, productId: string) => state.inventory.filter((item) => item.productId === productId)
 export const selectInventoryByBatch = (state: AppState, batch: string) => state.inventory.filter((item) => item.batch === batch)
 export const selectPendingSamples = (state: AppState) => state.samples.filter((sample) => ['等待反馈', '已寄出', '已签收', '测试中'].includes(sample.status))
