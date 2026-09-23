@@ -242,6 +242,13 @@ export type Order = {
   items?: OrderItem[]
   totalAmount?: number
   paidAmount?: number
+  // 付款流程字段（记录付款时写入，可选，向后兼容旧 localStorage 数据）
+  /** 付款状态：待付款 / 部分付款 / 已付款（与 payment 同步，便于独立展示） */
+  paymentStatus?: string
+  /** 付款日期（用户在记录付款时填写的到账日期） */
+  paymentDate?: string
+  /** 付款备注 */
+  paymentNote?: string
   createdAt?: string
   updatedAt?: string
   notes?: string

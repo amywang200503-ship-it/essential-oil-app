@@ -247,6 +247,24 @@ export const quoteExpiryState = (validUntil: string, simulatedToday: string): Qu
   if (days <= 7) return { expired: false, days, label: '报价即将到期' }
   return { expired: false, days, label: '' }
 }
+
+/**
+ * 新建/重新报价的默认有效期：基准今天 + days 天（默认 7 天）。
+ * 用途：避免新报价一创建就是“已过期”（历史报价日期一律不改）。
+ */
+export const quoteDefaultValidUntil = (simulatedToday: string, days = 7): string => {
+  const base = toLocalDate(resolveEffectiveToday(simulatedToday))
+  base.setDate(base.getDate() + days)
+  return formatDate(base)
+}
+
+/** 新的报价编号：Q + 基准日期 + 3 位流水（自动避开已有编号；不修改任何历史报价）。 */
+export const nextQuoteNo = (quotes: { id: string }[], simulatedToday: string): string => {
+  const base = `Q${resolveEffectiveToday(simulatedToday).replace(/-/g, '')}`
+  let seq = 1
+  while (quotes.some((quote) => quote.id === `${base}${String(seq).padStart(3, '0')}`)) seq += 1
+  return `${base}${String(seq).padStart(3, '0')}`
+}
 export const selectInventoryByProduct = (state: AppState, productId: string) => state.inventory.filter((item) => item.productId === productId)
 export const selectInventoryByBatch = (state: AppState, batch: string) => state.inventory.filter((item) => item.batch === batch)
 export const selectPendingSamples = (state: AppState) => state.samples.filter((sample) => ['等待反馈', '已寄出', '已签收', '测试中'].includes(sample.status))
