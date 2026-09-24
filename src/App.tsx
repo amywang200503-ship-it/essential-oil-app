@@ -307,8 +307,10 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
     showNotice(`订单 ${live.id} 状态已更新为「${step.to}」`)
   }
   /**
-   * 发货确认（第一阶段）：只把订单状态更新为「已发货」并追加时间轴发货事件，
-   * 复用既有 UPDATE_ORDER 与既有 status / timeline 结构；不扣库存、不产生出入库记录、不改预占。
+   * 发货确认（第二阶段）：按 FIFO 真实扣减库存后，把订单置为「已发货」。
+   * 复用既有 STOCK_OUT / UPDATE_ORDER 与 getFifoInventoryRecords / planFifoAllocation，不新增数据模型。
+   * 校验不通过（状态非备货中 / 单位不一致 / 该单位无批次 / 可用库存不足）时直接中止，不修改任何数据。
+   * 不创建订单、不改报价 / 客户 / 付款信息；重复提交由 STOCK_OUT 的 transactionId 幂等保护。
    */
   const confirmOrderShipment = (order: Order) => {
     const live = state.orders.find((item) => item.id === order.id) ?? order
@@ -316,11 +318,33 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
       showNotice(`订单当前状态为「${live.status}」，无法确认发货`)
       return
     }
-    const updated = { ...live, status: '已发货', timeline: [...(live.timeline ?? []), { date: today, event: '已确认发货' }] }
+    const orderUnit = live.unit || DEFAULT_INVENTORY_UNIT
+    const shipQuantity = Math.max(0, live.quantity - live.shipped)
+    if (shipQuantity <= 0) {
+      showNotice('该订单已无可发货数量')
+      return
+    }
+    // 校验一：产品在订单单位下必须存在库存批次（无批次 = 单位不一致或无该单位库存）
+    if (!getFifoInventoryRecords(state.inventory, live.productId, orderUnit).length) {
+      const productUnit = selectProductUnit(state, live.productId)
+      showNotice(productUnit === '多单位' ? `该产品存在多单位库存，与订单单位 ${orderUnit} 无法直接扣减，请先核对批次单位` : `该产品库存单位为 ${productUnit}，与订单单位 ${orderUnit} 不一致，无法发货`)
+      return
+    }
+    // 校验二：FIFO 分配（只用同单位批次、按入库日期升序），remaining > 0 表示可用库存不足
+    const { allocations, remaining } = planFifoAllocation(state.inventory, live.productId, shipQuantity, orderUnit)
+    if (remaining > 0) {
+      showNotice(`可用库存不足，无法发货（需 ${formatInventoryAmount(shipQuantity, orderUnit)}，缺 ${formatInventoryAmount(remaining, orderUnit)}）`)
+      return
+    }
+    // 按批次出库：referenceId = 订单编号，流水含产品 / 批次 / 数量 / 单位 / 日期；
+    // transactionId 由「订单号 + 发货前已发数量 + 本次数量」确定，重复点击时 STOCK_OUT 自动跳过，不会重复扣库存
+    const transactionId = `${live.id}-ship-${live.shipped}-${shipQuantity}`
+    allocations.forEach((item) => dispatch({ type: 'STOCK_OUT', payload: { inventoryId: item.inventoryId, quantity: item.quantity, unit: orderUnit, date: today, transactionId, referenceId: live.orderNo ?? live.id, note: live.quoteId ? `来源报价 ${live.quoteId}` : `来源订单 ${live.orderNo ?? live.id}` } }))
+    const updated = { ...live, status: '已发货', shipped: live.shipped + shipQuantity, stock: Math.max(0, (live.stock ?? 0) - shipQuantity), timeline: [...(live.timeline ?? []), { date: today, event: '已确认发货' }] }
     dispatch({ type: 'UPDATE_ORDER', payload: { id: live.id, changes: updated } })
     setSelected(updated)
     setShipConfirmOpen(false)
-    showNotice(`订单 ${live.id} 已确认发货`)
+    showNotice(`订单 ${live.id} 已确认发货，库存按 FIFO 扣减 ${formatInventoryAmount(shipQuantity, orderUnit)}`)
   }
   const cancelOrder = (order: Order) => {
     if (order.status === '已取消') {
@@ -394,7 +418,7 @@ function PaymentForm({ onClose, onSubmit, total }: { onClose: () => void; onSubm
  * 只读展示客户 / 订单 / 产品 / 数量 / 单位 / 当前库存提示，确认后仅回调 onConfirm（不扣库存）。
  * 库存提示由既有 selector 派生（selectQuoteStockStatus 按订单单位取值），不修改任何库存数据。
  */
-function ShipConfirmForm({ order, onClose, onConfirm }: { order: Order; onClose: () => void; onConfirm: () => void }) { const { state } = useAppStore(); const stockStatus = selectQuoteStockStatus(state, order.productId, order.unit); const stockText = stockStatus.comparable ? formatInventoryAmount(stockStatus.stock ?? 0, order.unit) : stockStatus.reason === 'unit-mismatch' ? `单位不一致（库存单位 ${stockStatus.stockUnit}）` : `暂无 ${order.unit} 单位库存记录`; return <div className="modal-backdrop"><form className="small-form" onSubmit={(event) => { event.preventDefault(); onConfirm() }}><div className="form-head"><div><span className="section-kicker">SHIP CONFIRM</span><h2>确认发货</h2><p>本阶段仅确认发货状态，不扣减库存。</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><div className="batch-detail-list"><p><span>客户名称</span><b>{order.customer}</b></p><p><span>订单编号</span><b>{order.id}</b></p><p><span>产品名称</span><b>{order.product}</b></p><p><span>数量</span><b>{order.quantity}</b></p><p><span>单位</span><b>{order.unit}</b></p><p><span>当前库存</span><b>{stockText}</b></p></div>{stockStatus.comparable && order.quantity > (stockStatus.stock ?? 0) && <div className="stock-warning">! 当前库存低于本单数量，请先确认备货情况。</div>}<div className="batch-detail-list"><p><span>状态变更</span><b>{order.status} → 已发货</b></p><p><span>库存影响</span><b>无（本阶段不扣减库存）</b></p></div></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button type="submit" className="primary-button">发货确认　→</button></div></form></div> }
+function ShipConfirmForm({ order, onClose, onConfirm }: { order: Order; onClose: () => void; onConfirm: () => void }) { const { state } = useAppStore(); const orderUnit = order.unit || DEFAULT_INVENTORY_UNIT; const shipQuantity = Math.max(0, order.quantity - order.shipped); const stockStatus = selectQuoteStockStatus(state, order.productId, orderUnit); const stockText = stockStatus.comparable ? formatInventoryAmount(stockStatus.stock ?? 0, orderUnit) : stockStatus.reason === 'unit-mismatch' ? `单位不一致（库存单位 ${stockStatus.stockUnit}）` : `暂无 ${orderUnit} 单位库存记录`; const unitReady = getFifoInventoryRecords(state.inventory, order.productId, orderUnit).length > 0; const { allocations, remaining } = planFifoAllocation(state.inventory, order.productId, shipQuantity, orderUnit); const blocked = !unitReady || remaining > 0 || shipQuantity <= 0; return <div className="modal-backdrop"><form className="small-form" onSubmit={(event) => { event.preventDefault(); if (!blocked) onConfirm() }}><div className="form-head"><div><span className="section-kicker">SHIP CONFIRM</span><h2>确认发货</h2><p>确认后按 FIFO 批次扣减库存，并将订单状态更新为已发货。</p></div><button type="button" onClick={onClose}>×</button></div><div className="form-body"><div className="batch-detail-list"><p><span>客户名称</span><b>{order.customer}</b></p><p><span>订单编号</span><b>{order.id}</b></p><p><span>产品名称</span><b>{order.product}</b></p><p><span>订单数量</span><b>{order.quantity} {orderUnit}</b></p><p><span>单位</span><b>{orderUnit}</b></p><p><span>本次发货数量</span><b>{formatInventoryAmount(shipQuantity, orderUnit)}</b></p><p><span>当前库存</span><b>{stockText}</b></p></div>{!unitReady ? <div className="stock-warning">{stockStatus.reason === 'unit-mismatch' ? `! 当前库存单位为 ${stockStatus.stockUnit}，与订单单位 ${orderUnit} 不一致，无法发货。` : `! 当前没有与订单单位 ${orderUnit} 一致的库存批次，无法发货。`}</div> : remaining > 0 ? <div className="stock-warning">! 可用库存不足（缺 {formatInventoryAmount(remaining, orderUnit)}），无法发货。</div> : <div className="batch-detail-list">{allocations.map((item) => <p key={item.inventoryId}><span>FIFO 批次 {item.batch}</span><b>{formatInventoryAmount(item.quantity, orderUnit)}</b></p>)}</div>}<div className="batch-detail-list"><p><span>状态变更</span><b>{order.status} → 已发货</b></p><p><span>库存影响</span><b>{blocked ? '无（校验未通过，不会扣减）' : `按 FIFO 扣减 ${formatInventoryAmount(shipQuantity, orderUnit)}`}</b></p><p><span>出库来源</span><b>{order.orderNo ?? order.id}</b></p></div></div><div className="form-foot"><button type="button" className="cancel-button" onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={blocked}>发货确认　→</button></div></form></div> }
 
 const quoteFilters = ['全部', '草稿', '已发送', '待确认', '已接受', '已拒绝', '已过期', '已转订单']
 /** 报价已发出、等待客户确认的状态集合（与 selectors.selectPendingQuotes 口径一致，兼容历史数据）。 */
