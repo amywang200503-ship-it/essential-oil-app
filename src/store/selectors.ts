@@ -272,8 +272,10 @@ export const selectPendingQuotes = (state: AppState) => state.quotes.filter((quo
 export const selectExpiringQuotes = (state: AppState) => state.quotes.filter((quote) => { const days = (new Date(`${quote.validUntil}T00:00:00`).getTime() - new Date(`${state.settings.simulatedToday}T00:00:00`).getTime()) / 86400000; return days >= 0 && days <= 7 })
 export const selectTotalOrders = (state: AppState) => state.orders.length
 export const selectCompletedOrders = (state: AppState) => state.orders.filter((order) => order.status === '已完成')
-export const selectPendingPayments = (state: AppState) => state.orders.filter((order) => order.payment !== '已付款')
-export const selectPendingShipments = (state: AppState) => state.orders.filter((order) => order.shipped < order.quantity && order.status !== '已取消')
+/** 待付款：未收齐款且订单未取消（已取消订单不再需要收款；与付款流程写入的 payment 字段同口径）。 */
+export const selectPendingPayments = (state: AppState) => state.orders.filter((order) => order.payment !== '已付款' && order.status !== '已取消')
+/** 待发货：已进入备货 / 发货环节（已付款 / 待发货 / 备货中 / 部分发货）且尚未发满；不含待付款（需先收款）与已完成 / 已取消。 */
+export const selectPendingShipments = (state: AppState) => state.orders.filter((order) => order.shipped < order.quantity && ['已付款', '待发货', '备货中', '部分发货'].includes(order.status))
 export const selectMonthlySales = (state: AppState) => state.orders.filter((order) => isSameMonth(order.orderDate, state.settings.simulatedToday) && order.status === '已完成').reduce((sum, order) => sum + orderTotal(order), 0)
 export const selectDailySales = (state: AppState, days = 7): { date: string; amount: number }[] => {
   const today = state.settings.simulatedToday
