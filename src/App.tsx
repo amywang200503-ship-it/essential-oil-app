@@ -310,6 +310,7 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
    * 发货确认（第二阶段）：按 FIFO 真实扣减库存后，把订单置为「已发货」。
    * 复用既有 STOCK_OUT / UPDATE_ORDER 与 getFifoInventoryRecords / planFifoAllocation，不新增数据模型。
    * 校验不通过（状态非备货中 / 单位不一致 / 该单位无批次 / 可用库存不足）时直接中止，不修改任何数据。
+   * 出库后同步释放本单预占（RELEASE_STOCK，复用既有 action），避免 reserved 残留；
    * 不创建订单、不改报价 / 客户 / 付款信息；重复提交由 STOCK_OUT 的 transactionId 幂等保护。
    */
   const confirmOrderShipment = (order: Order) => {
@@ -340,7 +341,13 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
     // transactionId 由「订单号 + 发货前已发数量 + 本次数量」确定，重复点击时 STOCK_OUT 自动跳过，不会重复扣库存
     const transactionId = `${live.id}-ship-${live.shipped}-${shipQuantity}`
     allocations.forEach((item) => dispatch({ type: 'STOCK_OUT', payload: { inventoryId: item.inventoryId, quantity: item.quantity, unit: orderUnit, date: today, transactionId, referenceId: live.orderNo ?? live.id, note: live.quoteId ? `来源报价 ${live.quoteId}` : `来源订单 ${live.orderNo ?? live.id}` } }))
-    const updated = { ...live, status: '已发货', shipped: live.shipped + shipQuantity, stock: Math.max(0, (live.stock ?? 0) - shipQuantity), timeline: [...(live.timeline ?? []), { date: today, event: '已确认发货' }] }
+    // 货物已实际出库，释放本单预占（若有），避免 reserved 残留导致可用库存被长期低估；
+    // 单位取预占批次自身单位，兼容历史遗留的跨单位预占（与取消订单同一口径）
+    ;(live.reservations ?? []).forEach((reservation) => {
+      const record = state.inventory.find((item) => item.id === reservation.inventoryId)
+      dispatch({ type: 'RELEASE_STOCK', payload: { inventoryId: reservation.inventoryId, quantity: reservation.quantity, unit: record ? recordUnit(record) : undefined } })
+    })
+    const updated = { ...live, status: '已发货', shipped: live.shipped + shipQuantity, stock: Math.max(0, (live.stock ?? 0) - shipQuantity), reservations: [], timeline: [...(live.timeline ?? []), { date: today, event: '已确认发货' }] }
     dispatch({ type: 'UPDATE_ORDER', payload: { id: live.id, changes: updated } })
     setSelected(updated)
     setShipConfirmOpen(false)
