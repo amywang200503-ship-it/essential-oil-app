@@ -124,7 +124,19 @@ type Quote = StoreQuote
 
 type Order = StoreOrder
 
-const orderFilters = ['全部', '待付款', '已付款', '待发货', '部分发货', '已发货', '已完成', '已取消']
+const orderFilters = ['全部', '待付款', '已付款', '待发货', '备货中', '部分发货', '已发货', '已完成', '已取消']
+/**
+ * 订单状态流转（单向、禁止跳级）：以当前 status 为键，只能推进到紧随其后的状态。
+ * 复用既有 status 字段与 UPDATE_ORDER，不新增状态字段；未列出的状态（已完成 / 已取消 / 部分发货）不提供状态动作。
+ * 「待发货」是既有付款流程（记录付款）产生的等价状态（已付款待备货），一并纳入以兼容历史数据与种子订单。
+ */
+const orderStatusFlow: Record<string, { label: string; to: string }> = {
+  '待付款': { label: '确认付款　→', to: '已付款' },
+  '已付款': { label: '开始备货　→', to: '备货中' },
+  '待发货': { label: '开始备货　→', to: '备货中' },
+  '备货中': { label: '确认发货　→', to: '已发货' },
+  '已发货': { label: '完成订单　→', to: '已完成' },
+}
 
 function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void; onCustomer: () => void; onProduct: () => void }) {
   const { state, dispatch } = useAppStore()
@@ -170,23 +182,33 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
       showNotice('订单已完成，不能重复付款')
       return
     }
+    const orderAmount = total(selected)
+    const remaining = Math.max(0, orderAmount - selected.paid)
     const data = new FormData(event.currentTarget)
-    const amount = Number(data.get('amount')) || 0
+    // 金额未填写时默认使用本次应收金额（待付款订单即订单 totalAmount）
+    const amount = Number(data.get('amount')) || remaining
     if (amount <= 0) {
-      showNotice('付款金额必须大于 0')
+      showNotice('该订单已无待收金额，无需再次付款')
+      return
+    }
+    // 不允许付款金额超过订单金额：超出部分不记录，直接提示并中止
+    if (amount > remaining) {
+      showNotice(`付款金额不能超过订单金额（本次最多可收 ${money(remaining)}）`)
       return
     }
     const paymentDate = String(data.get('date') || '') || today
     const paymentNote = String(data.get('note') || '').trim()
-    const newPaid = Math.min(total(selected), selected.paid + amount)
-    const fullyPaid = newPaid >= total(selected)
+    const newPaid = selected.paid + amount
+    const fullyPaid = newPaid >= orderAmount
     const paymentStatus = fullyPaid ? '已付款' : '部分付款'
-    // 只更新该订单自身的付款字段：不新增订单/报价，不触碰 inventory、inventoryTransactions、库存预占与 STOCK_OUT
-    const updated = { ...selected, paid: newPaid, paidAmount: newPaid, payment: paymentStatus, paymentStatus, paymentDate, paymentNote, status: selected.status === '待付款' ? (fullyPaid ? '待发货' : '待付款') : selected.status, timeline: [...(selected.timeline ?? []), { date: today, event: '收到付款' }] }
+    // 统一付款口径（「确认付款」与「记录付款」共用同一套写入）：
+    // status / payment / paymentStatus / paid / paidAmount / paymentDate / 付款备注 / 时间轴
+    // 只更新该订单自身：不新增订单、不新增报价，不触碰 inventory、库存预占与 STOCK_OUT
+    const updated = { ...selected, paid: newPaid, paidAmount: newPaid, payment: paymentStatus, paymentStatus, paymentDate, paymentNote, status: selected.status === '待付款' ? (fullyPaid ? '已付款' : '待付款') : selected.status, timeline: [...(selected.timeline ?? []), { date: today, event: '收到付款' }] }
     dispatch({ type: 'UPDATE_ORDER', payload: { id: selected.id, changes: updated } })
     setSelected(updated)
     setPaymentOpen(false)
-    showNotice('付款记录已更新')
+    showNotice(`付款已记录 ${money(amount)}，订单状态：${updated.status}`)
   }
   const confirmShipping = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -254,6 +276,30 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
     setShipping(false)
     showNotice(`已发货 ${formatInventoryAmount(amount, orderUnit)}，库存已扣减`)
   }
+  /**
+   * 订单状态流转：严格按 orderStatusFlow 推进一格，只改订单自身的 status 与时间轴，
+   * 复用既有 UPDATE_ORDER；不新增订单、不动库存、不产生出入库记录。
+   * 以 state 中的实时订单为准，状态不在流转表内时直接提示并中止（结构上杜绝跳级与回退）。
+   * 「待付款 → 已付款」不在此直接改状态，统一交给已有付款流程（PaymentForm + confirmPayment）写入，
+   * 保证「确认付款」与「记录付款」两个入口产生完全相同的付款数据。
+   */
+  const advanceOrderStatus = (order: Order) => {
+    const live = state.orders.find((item) => item.id === order.id) ?? order
+    const step = orderStatusFlow[live.status]
+    if (!step) {
+      showNotice(`订单当前状态为「${live.status}」，没有可推进的状态`)
+      return
+    }
+    // 待付款：不直接改状态，改为打开已有付款流程（金额 / 日期 / 备注由 PaymentForm 收集后交给 confirmPayment）
+    if (live.status === '待付款') {
+      setPaymentOpen(true)
+      return
+    }
+    const updated = { ...live, status: step.to, timeline: [...(live.timeline ?? []), { date: today, event: `状态更新：${live.status} → ${step.to}` }] }
+    dispatch({ type: 'UPDATE_ORDER', payload: { id: live.id, changes: updated } })
+    setSelected(updated)
+    showNotice(`订单 ${live.id} 状态已更新为「${step.to}」`)
+  }
   const cancelOrder = (order: Order) => {
     if (order.status === '已取消') {
       showNotice('订单已取消，不能重复取消')
@@ -292,11 +338,11 @@ function OrderManagement({ onBack, onCustomer, onProduct }: { onBack: () => void
     setRelinkOpen(false)
     showNotice('库存补关联完成，请再次点击发货')
   }
-  if (selected) return <><OrderDetail order={selected} total={total(selected)} available={available(selected)} onBack={() => setSelected(null)} onCustomer={onCustomer} onProduct={onProduct} onPay={() => setPaymentOpen(true)} onShip={() => { if ((selected.reservations ?? []).length > 0) { setShipping(true) } else { setRelinkOpen(true) } }} onAction={showNotice} onCancel={() => cancelOrder(selected)} />{shipping && <ShippingForm onClose={() => setShipping(false)} onSubmit={confirmShipping} max={selected.quantity - selected.shipped} />}{paymentOpen && <PaymentForm onClose={() => setPaymentOpen(false)} onSubmit={confirmPayment} total={total(selected) - selected.paid} />}{relinkOpen && <RelinkForm order={selected} plan={buildRelinkPlan(selected)} onClose={() => setRelinkOpen(false)} onConfirm={confirmRelink} />}</>
+  if (selected) return <><OrderDetail order={selected} total={total(selected)} available={available(selected)} onBack={() => setSelected(null)} onCustomer={onCustomer} onProduct={onProduct} onPay={() => setPaymentOpen(true)} onShip={() => { if ((selected.reservations ?? []).length > 0) { setShipping(true) } else { setRelinkOpen(true) } }} onAdvance={() => advanceOrderStatus(selected)} onAction={showNotice} onCancel={() => cancelOrder(selected)} />{shipping && <ShippingForm onClose={() => setShipping(false)} onSubmit={confirmShipping} max={selected.quantity - selected.shipped} />}{paymentOpen && <PaymentForm onClose={() => setPaymentOpen(false)} onSubmit={confirmPayment} total={total(selected) - selected.paid} />}{relinkOpen && <RelinkForm order={selected} plan={buildRelinkPlan(selected)} onClose={() => setRelinkOpen(false)} onConfirm={confirmRelink} />}</>
   return <div className="order-page"><div className="order-head"><div><button className="back-link" onClick={onBack}>← 返回工作台</button><div className="eyebrow">商业资产 · ORDER MANAGEMENT</div><h1>订单管理</h1><p>从客户确认到交付，完整记录订单流程。</p></div><button className="primary-button" onClick={() => setFormOpen(true)}>＋ 新建订单</button></div><div className="order-metrics"><div><span>本月订单</span><b>{orders.filter((order) => isSameMonth(order.orderDate, today)).length}</b><em>本月已创建</em></div><div><span>待处理</span><b>{orders.filter((o) => ['草稿', '待确认'].includes(o.status)).length}</b><em>需要确认</em></div><div className="order-warm"><span>待付款</span><b>{orders.filter((o) => o.payment === '待付款' || o.payment === '部分付款').length}</b><em>等待客户付款</em></div><div className="order-alert"><span>待发货</span><b>{orders.filter((o) => ['待发货', '部分发货'].includes(o.status)).length}</b><em>安排物流</em></div><div className="order-done"><span>已完成</span><b>{orders.filter((o) => o.status === '已完成').length}</b><em>已交付订单</em></div><div><span>已取消</span><b>{orders.filter((o) => o.status === '已取消').length}</b><em>已取消订单</em></div></div><div className="order-advice"><span>✦</span><div><b>今日订单提醒</b><small>有 {orders.filter((o) => o.payment === '待付款' || o.payment === '部分付款').length} 个订单等待付款。　有 {orders.filter((o) => ['待发货', '部分发货'].includes(o.status)).length} 个订单等待发货。　订单创建后先预占库存，确认发货时才扣减实际库存。</small></div><button onClick={() => setFilter('待付款')}>查看待付款 →</button></div><div className="order-toolbar"><label className="catalog-search"><span>⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索订单编号、客户、产品、联系人、物流单号..." /></label><div className="order-tabs">{orderFilters.map((item) => <button className={filter === item ? 'order-tab active' : 'order-tab'} key={item} onClick={() => setFilter(item)}>{item}</button>)}</div></div><div className="order-summary"><span>订单列表 <b>{visible.length}</b></span><span>模拟日期：{today}</span></div><div className="order-table"><div className="order-table-head"><span>订单信息</span><span>客户</span><span>产品</span><span>数量 / 金额</span><span>付款状态</span><span>订单状态</span><span>预占库存</span><span>操作</span></div>{visible.length ? visible.map((order) => <article className="order-row" key={order.id}><div className="order-id"><b>{order.id}</b><small>{order.orderDate}</small></div><div className="order-customer"><b>{order.customer}</b><small>{order.contact}</small></div><div className="order-product"><b>{order.product}</b><small>{order.quote}</small></div><div className="order-amount"><b>{order.quantity} {order.unit}</b><small>{money(total(order))}</small></div><span className={`order-payment ${order.payment === '已付款' ? 'paid' : 'unpaid'}`}><i />{order.payment}</span><span className={`order-status ${order.status === '已完成' ? 'done' : order.status === '待付款' ? 'pay' : 'ship'}`}><i />{order.status}</span><div className="reserved-stock"><b>{order.status === '已取消' ? 0 : order.quantity - order.shipped} KG</b><small>可用 {available(order)} KG</small></div><button className="order-detail-button" onClick={() => setSelected(order)}>查看详情　→</button></article>) : <div className="empty-catalog"><span>⌕</span><b>没有找到匹配的订单</b><small>试试订单编号、客户或产品关键词</small></div>}</div>{formOpen && <OrderForm onClose={() => setFormOpen(false)} onSubmit={saveOrder} />}{notice && <div className="toast">✓ {notice}</div>}</div>
 }
 
-function OrderDetail({ order, total, available, onBack, onCustomer, onProduct, onPay, onShip, onAction, onCancel }: { order: Order; total: number; available: number; onBack: () => void; onCustomer: () => void; onProduct: () => void; onPay: () => void; onShip: () => void; onAction: (text: string) => void; onCancel: () => void }) { const reserved = order.status === '已取消' ? 0 : order.quantity - order.shipped; return <div className="order-page order-detail-page"><button className="back-link" onClick={onBack}>← 返回订单管理</button><div className="order-detail-hero"><div className={`order-mark ${order.tone}`}>SO</div><div><div className="eyebrow">订单档案 · {order.id}</div><h1>{order.id}</h1><p><button onClick={onCustomer}>{order.customer}</button>　·　{order.contact}</p><div className="order-tags"><span className={`order-status ${order.status === '已完成' ? 'done' : 'ship'}`}><i />{order.status}</span><span>来源报价 {order.quote}</span></div></div><div className="order-detail-buttons">{order.payment !== '已付款' && order.status !== '已取消' && order.status !== '已完成' && <button className="secondary-button" onClick={onPay}>记录付款</button>}{reserved > 0 && <button className="primary-button" onClick={onShip}>发货　→</button>}</div></div><div className="order-detail-grid"><section className="order-card"><div className="order-card-head"><span className="section-kicker">01 · BASIC</span><h2>订单信息</h2></div><div className="order-fields"><OrderField label="订单编号" value={order.id} /><OrderField label="客户" value={order.customer} clickable={onCustomer} /><OrderField label="联系人" value={order.contact ?? ''} /><OrderField label="来源报价" value={order.quote ?? ''} /><OrderField label="订单日期" value={order.orderDate} /><OrderField label="预计交付" value={order.expected ?? ''} /></div></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">02 · PRODUCT</span><h2>产品与金额</h2></div><div className="order-product-detail"><div><b>{order.product}</b><small>{order.batch} · {order.unit}</small></div><button onClick={onProduct}>查看产品详情 →</button></div><div className="order-fields"><OrderField label="数量" value={`${order.quantity} ${order.unit}`} /><OrderField label="单价" value={`${money(order.price)} / ${order.unit}`} /><OrderField label="商品金额" value={money(order.quantity * order.price)} /><OrderField label="运费 / 税费" value={`${money(order.freight)} / ${money(order.tax)}`} /><OrderField label="订单总额" value={money(total)} /></div></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">03 · STOCK</span><h2>库存预占</h2></div><div className="stock-reservation"><div><span>实际库存</span><b>{order.stock} KG</b></div><div><span>已预占库存</span><b>{reserved} KG</b></div><div><span>可用库存</span><b>{available} KG</b></div></div><p className="stock-help">订单创建与付款不会扣库存，只有确认发货后才会扣减实际库存。</p></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">04 · DELIVERY</span><h2>付款与物流</h2></div><div className="order-fields"><OrderField label="付款状态" value={`${order.paymentStatus ?? order.payment} · ${money(order.paid)}`} /><OrderField label="付款日期" value={order.paymentDate || '—'} /><OrderField label="付款备注" value={order.paymentNote || '—'} /><OrderField label="付款方式" value="T/T 预付" /><OrderField label="发货状态" value={`${order.shipped} / ${order.quantity} KG`} /><OrderField label="物流公司" value={order.logistics || '待发货'} /><OrderField label="物流单号" value={order.tracking || '待生成'} /><OrderField label="交货方式" value={order.delivery ?? ''} /></div></section><section className="order-card timeline-card"><div className="order-card-head"><span className="section-kicker">05 · ACTIVITY</span><h2>订单时间轴</h2></div><div className="order-timeline">{(order.timeline ?? []).map((item, index) => <div key={`${item.date}-${item.event}-${index}`}><time>{item.date}</time><i className={index === (order.timeline ?? []).length - 1 ? 'current' : ''} /><b>{item.event}</b></div>)}</div></section></div><div className="order-next-actions"><b>下一步操作</b><button onClick={() => onAction('订单编辑已开启')}>编辑订单</button><button onClick={() => onAction('订单已复制')}>复制订单</button><button onClick={onCancel}>取消订单</button></div></div> }
+function OrderDetail({ order, total, available, onBack, onCustomer, onProduct, onPay, onShip, onAdvance, onAction, onCancel }: { order: Order; total: number; available: number; onBack: () => void; onCustomer: () => void; onProduct: () => void; onPay: () => void; onShip: () => void; onAdvance: () => void; onAction: (text: string) => void; onCancel: () => void }) { const reserved = order.status === '已取消' ? 0 : order.quantity - order.shipped; const statusStep = orderStatusFlow[order.status]; return <div className="order-page order-detail-page"><button className="back-link" onClick={onBack}>← 返回订单管理</button><div className="order-detail-hero"><div className={`order-mark ${order.tone}`}>SO</div><div><div className="eyebrow">订单档案 · {order.id}</div><h1>{order.id}</h1><p><button onClick={onCustomer}>{order.customer}</button>　·　{order.contact}</p><div className="order-tags"><span className={`order-status ${order.status === '已完成' ? 'done' : 'ship'}`}><i />{order.status}</span><span>来源报价 {order.quote}</span></div></div><div className="order-detail-buttons">{statusStep && <button className="primary-button" onClick={() => onAdvance()}>{statusStep.label}</button>}{order.payment !== '已付款' && order.status !== '已取消' && order.status !== '已完成' && <button className="secondary-button" onClick={onPay}>记录付款</button>}{reserved > 0 && order.status !== '已完成' && order.status !== '已取消' && <button className="primary-button" onClick={onShip}>发货　→</button>}</div></div><div className="order-detail-grid"><section className="order-card"><div className="order-card-head"><span className="section-kicker">01 · BASIC</span><h2>订单信息</h2></div><div className="order-fields"><OrderField label="订单编号" value={order.id} /><OrderField label="客户" value={order.customer} clickable={onCustomer} /><OrderField label="联系人" value={order.contact ?? ''} /><OrderField label="来源报价" value={order.quote ?? ''} /><OrderField label="订单日期" value={order.orderDate} /><OrderField label="预计交付" value={order.expected ?? ''} /></div></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">02 · PRODUCT</span><h2>产品与金额</h2></div><div className="order-product-detail"><div><b>{order.product}</b><small>{order.batch} · {order.unit}</small></div><button onClick={onProduct}>查看产品详情 →</button></div><div className="order-fields"><OrderField label="数量" value={`${order.quantity} ${order.unit}`} /><OrderField label="单价" value={`${money(order.price)} / ${order.unit}`} /><OrderField label="商品金额" value={money(order.quantity * order.price)} /><OrderField label="运费 / 税费" value={`${money(order.freight)} / ${money(order.tax)}`} /><OrderField label="订单总额" value={money(total)} /></div></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">03 · STOCK</span><h2>库存预占</h2></div><div className="stock-reservation"><div><span>实际库存</span><b>{order.stock} KG</b></div><div><span>已预占库存</span><b>{reserved} KG</b></div><div><span>可用库存</span><b>{available} KG</b></div></div><p className="stock-help">订单创建与付款不会扣库存，只有确认发货后才会扣减实际库存。</p></section><section className="order-card"><div className="order-card-head"><span className="section-kicker">04 · DELIVERY</span><h2>付款与物流</h2></div><div className="order-fields"><OrderField label="付款状态" value={`${order.paymentStatus ?? order.payment} · ${money(order.paid)}`} /><OrderField label="付款日期" value={order.paymentDate || '—'} /><OrderField label="付款备注" value={order.paymentNote || '—'} /><OrderField label="付款方式" value="T/T 预付" /><OrderField label="发货状态" value={`${order.shipped} / ${order.quantity} KG`} /><OrderField label="物流公司" value={order.logistics || '待发货'} /><OrderField label="物流单号" value={order.tracking || '待生成'} /><OrderField label="交货方式" value={order.delivery ?? ''} /></div></section><section className="order-card timeline-card"><div className="order-card-head"><span className="section-kicker">05 · ACTIVITY</span><h2>订单时间轴</h2></div><div className="order-timeline">{(order.timeline ?? []).map((item, index) => <div key={`${item.date}-${item.event}-${index}`}><time>{item.date}</time><i className={index === (order.timeline ?? []).length - 1 ? 'current' : ''} /><b>{item.event}</b></div>)}</div></section></div><div className="order-next-actions"><b>下一步操作</b><button onClick={() => onAction('订单编辑已开启')}>编辑订单</button><button onClick={() => onAction('订单已复制')}>复制订单</button><button onClick={onCancel}>取消订单</button></div></div> }
 
 function OrderField({ label, value, clickable }: { label: string; value: string; clickable?: () => void }) { return <div><small>{label}</small>{clickable ? <button onClick={clickable}>{value}　↗</button> : <b>{value}</b>}</div> }
 
