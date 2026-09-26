@@ -1,4 +1,4 @@
-import type { AppState, Customer, InventoryRecord, Order, Product } from './AppStore'
+import type { AppState, Customer, InventoryRecord, Order, Product, Recipe } from './AppStore'
 
 export const isSameMonth = (date: string, today: string) => date.slice(0, 7) === today.slice(0, 7)
 export const currentStock = (item: InventoryRecord) => item.inbound - item.outbound
@@ -328,3 +328,50 @@ export const selectPendingTasks = (state: AppState) => ({ followUps: selectPendi
 
 export const selectCustomersByStatus = (state: AppState, status: string): Customer[] => state.customers.filter((customer) => customer.status === status)
 export const selectProductsWithStock = (state: AppState): (Product & { currentStock: number })[] => state.products.map((product) => ({ ...product, currentStock: state.inventory.filter((item) => item.productId === product.id).reduce((sum, item) => sum + currentStock(item), 0) }))
+
+// —— AI 配方采集（第一阶段：数据源 / 采集任务 / 待审核配方 / 简单文本产品匹配）——
+export const selectRecipeSources = (state: AppState) => state.recipeSources
+export const selectRecipes = (state: AppState) => state.recipes
+export const selectPendingRecipes = (state: AppState) => state.recipes.filter((recipe) => recipe.reviewStatus === '待审核')
+export const selectCollectionTasks = (state: AppState) => state.collectionTasks
+
+/** 数据完整度（0-100）：按关键字段填写情况估算，第一阶段只用简单规则，不接 AI。 */
+export const computeRecipeCompleteness = (recipe: Recipe): number => {
+  const ingredients = recipe.ingredients ?? []
+  const checks = [
+    Boolean(recipe.name),
+    Boolean(recipe.productType),
+    ingredients.length > 0,
+    ingredients.length > 0 && ingredients.every((item) => Boolean(item.name)),
+    ingredients.some((item) => Boolean(item.inci)),
+    ingredients.some((item) => Boolean(item.percentage) || Boolean(item.weight)),
+    (recipe.steps ?? []).length > 0,
+    Boolean(recipe.phase),
+    Boolean(recipe.sourceUrl),
+    Boolean(recipe.description),
+  ]
+  return Math.round((checks.filter(Boolean).length / checks.length) * 100)
+}
+
+/** 匹配时忽略的通用词，避免 oil / water 之类的词把不相关产品也算命中。 */
+const RECIPE_GENERIC_WORDS = new Set(['oil', 'oils', 'water', 'aqua', 'seed', 'seeds', 'kernel', 'extract', 'powder', 'acid', 'leaf', 'root', 'fruit', 'flower', 'juice', 'wax', 'butter', 'solution', 'liquid', 'and', 'with', 'the'])
+const recipeNormalizeText = (text: string) => (text || '').toLowerCase().replace(/[\s_\-().,/（）【】]/g, '')
+const recipeKeywords = (text: string) => (text || '').toLowerCase().split(/[^a-z\u4e00-\u9fa5]+/).filter((word) => word.length >= 4 && !RECIPE_GENERIC_WORDS.has(word))
+
+/**
+ * 配方原料 ↔ 本地产品 的简单文本匹配（第一阶段：纯文本，不接 AI / 向量数据库 / 语义搜索）。
+ * 规则：① 规范化后整串互相包含（≥3 字符）；② 关键词前缀匹配（≥5 字符），并过滤通用词。
+ * 匹配字段：产品 name / en / inci ↔ 原料 name / inci。
+ */
+export const matchRecipeProducts = (state: AppState, recipe: Recipe): string[] => {
+  const ingredientTexts = (recipe.ingredients ?? []).flatMap((item) => [item.name, item.inci]).filter(Boolean)
+  const normalized = ingredientTexts.map(recipeNormalizeText).filter((text) => text.length >= 3)
+  const keywords = new Set(ingredientTexts.flatMap(recipeKeywords))
+  if (!normalized.length && !keywords.size) return []
+  return state.products.filter((product) => {
+    const targets = [product.name, product.en, product.inci].filter(Boolean)
+    const normalizedTargets = targets.map(recipeNormalizeText).filter((text) => text.length >= 3)
+    if (normalized.some((text) => normalizedTargets.some((target) => target.includes(text) || text.includes(target)))) return true
+    return targets.flatMap(recipeKeywords).some((word) => Array.from(keywords).some((keyword) => word === keyword || (word.length >= 5 && keyword.length >= 5 && (word.startsWith(keyword) || keyword.startsWith(word)))))
+  }).map((product) => product.id)
+}

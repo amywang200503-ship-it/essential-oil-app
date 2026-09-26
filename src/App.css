@@ -369,3 +369,43 @@ hr {
 .quote-expiry.expired,.quote-expiry.expired small,.expiry-tag.expired{color:#9e4534}
 .quote-detail-buttons .primary-button:disabled{background:#71916d;box-shadow:none;cursor:not-allowed}
 .quote-next-actions button:disabled{background:#2a2a2a;opacity:.45;cursor:not-allowed}
+
+
+/* ===== AI 配方采集（第一阶段 MVP）===== */
+.recipe-panel{margin-top:34px;border-top:1px solid var(--app-border);padding-top:26px}
+.recipe-counts{font-size:11px;color:var(--app-text-muted)}
+.recipe-counts b{color:var(--app-primary);font-size:13px;margin:0 3px}
+.recipe-subtitle{font-size:13px;color:var(--app-text);margin:22px 0 10px;font-weight:600}
+.recipe-sources{display:grid;gap:10px}
+.recipe-source-card{display:flex;flex-wrap:wrap;align-items:center;gap:9px;border:1px solid var(--app-border);border-radius:6px;padding:13px 15px;background:var(--app-surface)}
+.recipe-source-card>div{min-width:180px}
+.recipe-source-card b{display:block;font-size:13px;color:var(--app-text)}
+.recipe-source-card small{font-size:10px;color:var(--app-text-muted)}
+.recipe-badge{border:1px solid var(--app-border);border-radius:20px;padding:3px 9px;font-size:10px;color:var(--app-text-muted);background:var(--app-bg)}
+.recipe-badge.ok{border-color:var(--app-primary);color:var(--app-primary)}
+.recipe-badge.warn{border-color:#71916d;color:#71916d}
+.recipe-note{flex:1 1 100%;font-size:10px;color:var(--app-text-muted)}
+.recipe-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.recipe-toolbar select{border:1px solid var(--app-border);border-radius:5px;padding:9px 11px;font-size:12px;color:var(--app-text);background:var(--app-surface)}
+.recipe-toolbar .catalog-search{flex:1 1 260px}
+.recipe-meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;border:1px solid var(--app-border);border-radius:6px;padding:15px;background:var(--app-surface)}
+.recipe-meta small{display:block;font-size:10px;color:var(--app-text-muted)}
+.recipe-meta b{font-size:12px;color:var(--app-text)}
+.recipe-link{margin-top:12px;font-size:11px;color:var(--app-text-muted);word-break:break-all}
+.recipe-link a,.recipe-table a,.recipe-pending-row a{color:var(--app-primary)}
+.recipe-table,.recipe-pending{border:1px solid var(--app-border);border-radius:6px;overflow:hidden;background:var(--app-surface)}
+.recipe-table-head,.recipe-table .recipe-row{display:grid;grid-template-columns:2fr 2fr .8fr 1.3fr 1.2fr;gap:10px;align-items:center;padding:11px 14px}
+.recipe-pending-head,.recipe-pending-row{display:grid;grid-template-columns:1.8fr .8fr 1fr 1.1fr .7fr .6fr .7fr 1.5fr;gap:10px;align-items:center;padding:11px 14px}
+.recipe-table-head,.recipe-pending-head{background:var(--app-bg);font-size:10px;color:var(--app-text-muted)}
+.recipe-table .recipe-row,.recipe-pending-row{border-top:1px solid var(--app-border);font-size:11px;color:var(--app-text-muted)}
+.recipe-row b,.recipe-pending-row b{font-size:12px;color:var(--app-text)}
+.recipe-row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.recipe-row-actions button{padding:6px 10px;font-size:11px}
+.recipe-steps{margin:0;padding-left:18px;font-size:12px;color:var(--app-text);line-height:1.9}
+.recipe-matches{display:flex;flex-wrap:wrap;gap:9px}
+.recipe-matches>span{border:1px solid var(--app-border);border-radius:5px;padding:9px 12px;background:var(--app-surface)}
+.recipe-matches b{display:block;font-size:12px;color:var(--app-text)}
+.recipe-matches small{font-size:10px;color:var(--app-text-muted)}
+.recipe-review-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:22px;border-top:1px solid var(--app-border);padding-top:16px}
+.recipe-review-bar .catalog-search{flex:1 1 240px}
+@media (max-width:700px){.recipe-meta{grid-template-columns:1fr 1fr}.recipe-table-head,.recipe-pending-head{display:none}.recipe-table .recipe-row,.recipe-pending-row{grid-template-columns:1fr 1fr;gap:8px 10px}.recipe-table .recipe-row b,.recipe-pending-row b{grid-column:1 / -1}.recipe-row-actions{grid-column:1 / -1}.recipe-toolbar,.recipe-review-bar{flex-direction:column;align-items:stretch}.recipe-toolbar button{width:100%}}

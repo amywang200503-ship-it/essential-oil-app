@@ -306,6 +306,64 @@ export type AppSettings = {
   defaultUnit: string
 }
 
+/** AI 配方采集：数据源（第一阶段仅预置 MakingCosmetics，仅手工录入公开页面 URL） */
+export type RecipeSource = {
+  id: string
+  name: string
+  website: string
+  sourceType: string
+  status: string
+  riskLevel: string
+  notes: string
+  createdAt: string
+}
+
+/** 配方原料：percentage / weight 允许为空字符串（表示来源页面未公开该项） */
+export type RecipeIngredient = {
+  name: string
+  inci: string
+  percentage: string
+  weight: string
+  function: string
+  phase: string
+}
+
+/** 采集到的配方（reviewStatus: 待审核 / 已通过 / 已驳回；professionalLevel: ★★★★★ 专业公开配方 / ★★★★ 参考配方 / ★★★ 配方思路 / 信息不足） */
+export type Recipe = {
+  id: string
+  name: string
+  productType: string
+  description: string
+  ingredients: RecipeIngredient[]
+  steps: string[]
+  phase: string
+  sourceName: string
+  sourceUrl: string
+  sourceType: string
+  collectedAt: string
+  professionalLevel: string
+  dataCompleteness: number
+  reviewStatus: string
+  reviewNote: string
+  matchedProductIds: string[]
+  createdAt: string
+  updatedAt: string
+  /** 测试数据标记（AI采集测试数据，仅用于功能验证） */
+  testData?: boolean
+}
+
+/** 采集任务：第一阶段只创建本地任务记录，不做联网抓取 */
+export type CollectionTask = {
+  id: string
+  sourceId: string
+  sourceName: string
+  url: string
+  status: string
+  note: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type AppState = {
   products: Product[]
   inventory: InventoryRecord[]
@@ -318,6 +376,9 @@ export type AppState = {
   productDocuments: ProductDocument[]
   productDrafts: ProductDraft[]
   leadCandidates: LeadCandidate[]
+  recipeSources: RecipeSource[]
+  recipes: Recipe[]
+  collectionTasks: CollectionTask[]
   settings: AppSettings
 }
 
@@ -357,6 +418,12 @@ export type AppAction =
   | { type: 'ADD_DOCUMENT'; payload: ProductDocument }
   | { type: 'UPDATE_DOCUMENT'; payload: { id: string; changes: Partial<ProductDocument> } }
   | { type: 'DELETE_DOCUMENT'; payload: { id: string } }
+  | { type: 'ADD_RECIPE'; payload: Recipe }
+  | { type: 'UPDATE_RECIPE'; payload: { id: string; changes: Partial<Recipe> } }
+  | { type: 'ADD_RECIPE_SOURCE'; payload: RecipeSource }
+  | { type: 'UPDATE_RECIPE_SOURCE'; payload: { id: string; changes: Partial<RecipeSource> } }
+  | { type: 'ADD_COLLECTION_TASK'; payload: CollectionTask }
+  | { type: 'UPDATE_COLLECTION_TASK'; payload: { id: string; changes: Partial<CollectionTask> } }
 
 const products: Product[] = [
   { id: 'product-argan-oil', name: '摩洛哥阿甘油', en: 'Argania Spinosa Kernel Oil', inci: 'Argania Spinosa Kernel Oil', category: '植物油', source: '阿甘树', part: '果仁', method: '冷压萃取', origin: 'Morocco', spec: '1 KG / 5 KG / 25 KG', moq: '25 KG', safety: '300 KG', stock: 72, batch: 'ARG20260801', price: 380, tone: 'amber' },
@@ -415,6 +482,41 @@ const initialState: AppState = {
   ],
   productDrafts: [],
   leadCandidates: [],
+  // —— AI 配方采集（第一阶段：仅预置 MakingCosmetics 数据源 + 1 条测试配方，不做联网抓取）——
+  recipeSources: [
+    { id: 'recipe-source-makingcosmetics', name: 'MakingCosmetics', website: 'https://www.makingcosmetics.com/', sourceType: '官方公开配方', status: '启用', riskLevel: '待审核', notes: '第一阶段测试来源，仅采集公开页面，不处理会员/付费内容', createdAt: '2026-08-23' },
+  ],
+  recipes: [
+    {
+      id: 'recipe-test-001',
+      name: '阿甘油滋养面霜（测试配方）',
+      productType: '面霜',
+      description: 'AI采集测试数据，仅用于功能验证。结构参考公开配方页面常见的「A 相 + B 相 + 降温后添加」写法，未复制任何原文。',
+      ingredients: [
+        { name: 'Argania Spinosa Kernel Oil', inci: 'Argania Spinosa Kernel Oil', percentage: '10', weight: '', function: '润肤油脂', phase: 'B 相（油相）' },
+        { name: 'Opuntia Ficus-Indica Seed Oil', inci: 'Opuntia Ficus-Indica Seed Oil', percentage: '5', weight: '', function: '抗氧滋润', phase: 'B 相（油相）' },
+        { name: 'Moroccan Lava Clay', inci: 'Moroccan Lava Clay', percentage: '3', weight: '', function: '吸附净化', phase: 'A 相（水相）' },
+        { name: 'Emulsifying Wax NF', inci: 'Cetearyl Alcohol (and) Polysorbate 60', percentage: '6', weight: '', function: '乳化剂', phase: 'B 相（油相）' },
+        { name: 'Glycerin', inci: 'Glycerin', percentage: '4', weight: '', function: '保湿剂', phase: 'A 相（水相）' },
+        { name: 'Water', inci: 'Aqua', percentage: '至 100', weight: '', function: '溶剂', phase: 'A 相（水相）' },
+      ],
+      steps: ['A 相原料混合，加热至 70°C。', 'B 相原料混合，加热至 70°C。', '将 B 相缓慢加入 A 相，持续搅拌乳化。', '降温至 40°C 以下，加入防腐剂并搅匀。', '灌装并记录批次。'],
+      phase: 'A 相（水相）+ B 相（油相）',
+      sourceName: 'MakingCosmetics',
+      sourceUrl: 'https://www.makingcosmetics.com/',
+      sourceType: '官方公开配方',
+      collectedAt: '2026-08-23',
+      professionalLevel: '★★★★ 参考配方',
+      dataCompleteness: 100,
+      reviewStatus: '待审核',
+      reviewNote: 'AI采集测试数据，仅用于功能验证；链接指向来源站点，未复制原文。',
+      matchedProductIds: ['product-argan-oil', 'product-cactus-oil', 'product-rhassoul-clay'],
+      createdAt: '2026-08-23',
+      updatedAt: '2026-08-23',
+      testData: true,
+    },
+  ],
+  collectionTasks: [],
   settings: { simulatedToday: '2026-08-23', currency: 'CNY', defaultUnit: 'KG' },
 }
 
@@ -591,6 +693,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     case 'ADD_DOCUMENT': return { ...state, productDocuments: [...state.productDocuments, action.payload] }
     case 'UPDATE_DOCUMENT': return { ...state, productDocuments: updateById(state.productDocuments, action.payload.id, action.payload.changes) }
     case 'DELETE_DOCUMENT': return { ...state, productDocuments: state.productDocuments.filter((item) => item.id !== action.payload.id) }
+    case 'ADD_RECIPE': return { ...state, recipes: [action.payload, ...state.recipes] }
+    case 'UPDATE_RECIPE': return { ...state, recipes: updateById(state.recipes, action.payload.id, action.payload.changes) }
+    case 'ADD_RECIPE_SOURCE': return { ...state, recipeSources: [...state.recipeSources, action.payload] }
+    case 'UPDATE_RECIPE_SOURCE': return { ...state, recipeSources: updateById(state.recipeSources, action.payload.id, action.payload.changes) }
+    case 'ADD_COLLECTION_TASK': return { ...state, collectionTasks: [action.payload, ...state.collectionTasks] }
+    case 'UPDATE_COLLECTION_TASK': return { ...state, collectionTasks: updateById(state.collectionTasks, action.payload.id, action.payload.changes) }
     default: return state
   }
 }
@@ -626,7 +734,14 @@ function loadStoredState(): AppState {
     if (!parsed || parsed.version !== STORAGE_VERSION || !parsed.state || typeof parsed.state !== 'object' || !Array.isArray((parsed.state as AppState).inventory) || !Array.isArray((parsed.state as AppState).products)) {
       return initialState
     }
-    return parsed.state as AppState
+    const stored = parsed.state as AppState
+    // 兼容旧版本地数据：新增的 AI 配方采集集合缺失时回退到初始数据，避免 undefined
+    return {
+      ...stored,
+      recipeSources: Array.isArray(stored.recipeSources) ? stored.recipeSources : initialState.recipeSources,
+      recipes: Array.isArray(stored.recipes) ? stored.recipes : initialState.recipes,
+      collectionTasks: Array.isArray(stored.collectionTasks) ? stored.collectionTasks : initialState.collectionTasks,
+    }
   } catch {
     return initialState
   }

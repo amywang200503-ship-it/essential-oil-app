@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useAppStore, type Customer as StoreCustomer, type Formula as StoreFormula, type InventoryRecord as StoreInventoryRecord, type LeadCandidate as StoreLeadCandidate, type Order as StoreOrder, type Product as StoreProduct, type ProductDraft as StoreProductDraft, type Quote as StoreQuote, type Sample as StoreSample } from './store/AppStore'
-import { type AnalyticsPeriod as StoreAnalyticsPeriod, type DateRange, BUSINESS_UNITS, DEFAULT_INVENTORY_UNIT, findReservationUnitMismatch, formatInventoryAmount, getAnalyticsDateRange, getFifoInventoryRecords, isSameMonth, isValidBusinessUnit, isWithinDateRange, nextQuoteNo, planFifoAllocation, quoteDefaultValidUntil, quoteExpiryState, recordUnit, resolveEffectiveToday, selectAverageOrderValue, selectCompletedOrders, selectCustomerStats, selectDailySales, selectExpiringProducts, selectExpiringQuotes, selectHighIntentCustomers, selectInventoryTotalLabel, selectLowStockProducts, selectMonthlySales, selectNewCustomers, selectPendingPayments, selectPendingQuotes, selectPendingSamples, selectPendingShipments, selectPendingTasks, selectProductsWithStock, selectProductUnit, selectQuoteStockStatus, selectSalesFunnel } from './store/selectors'
+import { useAppStore, type Customer as StoreCustomer, type Formula as StoreFormula, type InventoryRecord as StoreInventoryRecord, type LeadCandidate as StoreLeadCandidate, type Order as StoreOrder, type Product as StoreProduct, type ProductDraft as StoreProductDraft, type Quote as StoreQuote, type Recipe as StoreRecipe, type Sample as StoreSample } from './store/AppStore'
+import { type AnalyticsPeriod as StoreAnalyticsPeriod, type DateRange, BUSINESS_UNITS, DEFAULT_INVENTORY_UNIT, computeRecipeCompleteness, findReservationUnitMismatch, formatInventoryAmount, getAnalyticsDateRange, getFifoInventoryRecords, isSameMonth, isValidBusinessUnit, isWithinDateRange, matchRecipeProducts, nextQuoteNo, planFifoAllocation, quoteDefaultValidUntil, quoteExpiryState, recordUnit, resolveEffectiveToday, selectAverageOrderValue, selectCollectionTasks, selectCompletedOrders, selectCustomerStats, selectDailySales, selectExpiringProducts, selectExpiringQuotes, selectHighIntentCustomers, selectInventoryTotalLabel, selectLowStockProducts, selectMonthlySales, selectNewCustomers, selectPendingPayments, selectPendingQuotes, selectPendingRecipes, selectPendingSamples, selectPendingShipments, selectPendingTasks, selectProductsWithStock, selectProductUnit, selectQuoteStockStatus, selectRecipeSources, selectRecipes, selectSalesFunnel } from './store/selectors'
 import { generateLeadCandidate, generateProductDraft } from './services/templateGenerator'
 import { aiStructureProduct, researchProductUrl, type UrlResearchResult } from './services/productResearch'
 import './App.css'
@@ -1121,6 +1121,102 @@ function ProductCenter({ onBack }: { onBack: () => void }) {
   </div>
 }
 
+/** AI 配方采集任务状态（第一阶段：只创建本地任务记录，不联网抓取） */
+const collectionTaskStatuses = ['待处理', '处理中', '已提取', '已进入审核', '失败']
+
+/** 采集任务 / 配方编号：前缀 + 基准日期 + 3 位流水（自动避开已有编号；纯函数，渲染期安全） */
+const nextRecipeSeqId = (prefix: string, existing: string[], today: string) => {
+  const base = `${prefix}-${today.replace(/-/g, '')}`
+  let seq = existing.length + 1
+  while (existing.includes(`${base}-${String(seq).padStart(3, '0')}`)) seq += 1
+  return `${base}-${String(seq).padStart(3, '0')}`
+}
+
+/**
+ * AI 配方采集（第一阶段 MVP）：
+ * 数据源 → 手工录入公开来源 URL → 创建采集任务 → 导入测试配方 → 产品文本匹配 → 待审核 → 通过 / 驳回。
+ * 只处理本地数据与简单文本匹配：不联网抓取、不绕过登录/会员/付费墙、不接 AI API 与向量库。
+ */
+export function RecipeCollectionPanel() {
+  const { state, dispatch } = useAppStore()
+  const today = state.settings.simulatedToday
+  const sources = selectRecipeSources(state)
+  const tasks = selectCollectionTasks(state)
+  const recipes = selectRecipes(state)
+  const pendingRecipes = selectPendingRecipes(state)
+  const testTemplate = recipes.find((item) => item.testData)
+  const [sourceId, setSourceId] = useState(sources[0]?.id ?? '')
+  const [urlInput, setUrlInput] = useState('')
+  const [detail, setDetail] = useState<StoreRecipe | null>(null)
+  const [reviewNote, setReviewNote] = useState('')
+  const [notice, setNotice] = useState('')
+  const showNotice = (text: string) => { setNotice(text); window.setTimeout(() => setNotice(''), 2300) }
+  const activeSource = sources.find((item) => item.id === sourceId) ?? sources[0]
+
+  /** 创建采集任务：第一阶段只写一条本地任务记录（状态：待处理） */
+  const createTask = () => {
+    const url = urlInput.trim()
+    if (!url) { showNotice('请先填写配方来源 URL'); return }
+    if (!activeSource) { showNotice('请先选择数据源'); return }
+    const id = nextRecipeSeqId('recipe-task', tasks.map((item) => item.id), today)
+    dispatch({ type: 'ADD_COLLECTION_TASK', payload: { id, sourceId: activeSource.id, sourceName: activeSource.name, url, status: '待处理', note: '第一阶段：仅创建本地任务记录，未联网抓取；请人工核对公开页面后再导入配方', createdAt: today, updatedAt: today } })
+    setUrlInput('')
+    showNotice('采集任务已创建（待处理）')
+  }
+
+  /** 导入测试配方：复制内置测试配方为一条新的待审核配方，并自动完成产品匹配与完整度计算 */
+  const importTestRecipe = () => {
+    if (!testTemplate) { showNotice('未找到内置测试配方，无法导入'); return }
+    const id = nextRecipeSeqId('recipe', recipes.map((item) => item.id), today)
+    const recipe: StoreRecipe = { ...testTemplate, id, name: `${testTemplate.name.replace(/（测试配方.*）$/, '')}（测试配方·${id.slice(-3)}）`, ingredients: testTemplate.ingredients.map((item) => ({ ...item })), steps: [...testTemplate.steps], collectedAt: today, reviewStatus: '待审核', reviewNote: 'AI采集测试数据，仅用于功能验证', createdAt: today, updatedAt: today, testData: true }
+    recipe.matchedProductIds = matchRecipeProducts(state, recipe)
+    recipe.dataCompleteness = computeRecipeCompleteness(recipe)
+    dispatch({ type: 'ADD_RECIPE', payload: recipe })
+    dispatch({ type: 'ADD_COLLECTION_TASK', payload: { id: nextRecipeSeqId('recipe-task', tasks.map((item) => item.id), today), sourceId: activeSource?.id ?? 'recipe-source-makingcosmetics', sourceName: recipe.sourceName, url: recipe.sourceUrl, status: '已进入审核', note: `手动导入测试配方（第一阶段无联网抓取）：${recipe.name}`, createdAt: today, updatedAt: today } })
+    showNotice(`测试配方已导入，进入待审核：${recipe.name}`)
+  }
+
+  /** 审核：写入审核状态与备注，并刷新产品匹配结果（保持数据与产品中心一致） */
+  const reviewRecipe = (recipe: StoreRecipe, reviewStatus: string, fromList = false) => {
+    dispatch({ type: 'UPDATE_RECIPE', payload: { id: recipe.id, changes: { reviewStatus, reviewNote: reviewNote.trim() || (reviewStatus === '已通过' ? '人工审核通过' : '人工审核驳回'), matchedProductIds: matchRecipeProducts(state, recipe), updatedAt: today } } })
+    if (!fromList) setDetail(null)
+    setReviewNote('')
+    showNotice(`配方已${reviewStatus === '已通过' ? '通过' : '驳回'}：${recipe.name}`)
+  }
+  const setTaskStatus = (id: string, status: string) => dispatch({ type: 'UPDATE_COLLECTION_TASK', payload: { id, changes: { status, updatedAt: today } } })
+
+  if (detail) {
+    const matchedIds = matchRecipeProducts(state, detail)
+    const matchedProducts = state.products.filter((product) => matchedIds.includes(product.id))
+    return <div className="recipe-panel">
+      <div className="section-heading"><div><span className="section-kicker">AI 配方采集 · RECIPE REVIEW</span><h2>{detail.name}</h2></div><button className="secondary-button" onClick={() => setDetail(null)}>← 返回待审核列表</button></div>
+      {detail.testData && <div className="inventory-note"><span>◉</span><div><b>AI采集测试数据，仅用于功能验证</b><small>{detail.description}</small></div></div>}
+      <div className="recipe-meta"><div><small>产品类型</small><b>{detail.productType || '—'}</b></div><div><small>专业度</small><b>{detail.professionalLevel}</b></div><div><small>数据完整度</small><b>{detail.dataCompleteness}%</b></div><div><small>审核状态</small><b>{detail.reviewStatus}</b></div><div><small>采集日期</small><b>{detail.collectedAt}</b></div><div><small>来源</small><b>{detail.sourceName} · {detail.sourceType}</b></div></div>
+      <div className="recipe-link"><small>来源链接</small><a href={detail.sourceUrl} target="_blank" rel="noreferrer">{detail.sourceUrl}</a></div>
+      <h3 className="recipe-subtitle">原料（{detail.ingredients.length}）</h3>
+      <div className="recipe-table"><div className="recipe-table-head"><span>原料</span><span>INCI</span><span>百分比</span><span>Phase</span><span>作用</span></div>{detail.ingredients.map((item, index) => <div className="recipe-row" key={`${item.name}-${index}`}><b>{item.name || '—'}</b><small>{item.inci || '—'}</small><small>{item.percentage || item.weight || '—'}</small><small>{item.phase || detail.phase || '—'}</small><small>{item.function || '—'}</small></div>)}</div>
+      <h3 className="recipe-subtitle">制作步骤</h3>
+      <ol className="recipe-steps">{(detail.steps ?? []).map((step, index) => <li key={`${step}-${index}`}>{step}</li>)}</ol>
+      <h3 className="recipe-subtitle">匹配到的产品（{matchedProducts.length}）</h3>
+      {matchedProducts.length ? <div className="recipe-matches">{matchedProducts.map((product) => <span key={product.id}><b>{product.name}</b><small>{product.en}</small></span>)}</div> : <div className="empty-catalog"><span>⌕</span><b>未匹配到本地产品</b><small>第一阶段仅按 name / en / inci 做简单文本匹配。</small></div>}
+      <div className="recipe-review-bar"><label className="catalog-search"><span>✎</span><input value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} placeholder="审核备注（可选）" /></label><button className="primary-button" onClick={() => reviewRecipe(detail, '已通过')}>通过</button><button className="secondary-button" onClick={() => reviewRecipe(detail, '已驳回')}>驳回</button></div>
+    </div>
+  }
+  return <div className="recipe-panel">
+    <div className="section-heading"><div><span className="section-kicker">AI 配方采集 · RECIPE COLLECTION</span><h2>AI 配方采集</h2><p>先登记公开来源，再人工导入配方进入审核。</p></div><span className="recipe-counts">待审核 <b>{pendingRecipes.length}</b> · 配方合计 <b>{recipes.length}</b> · 采集任务 <b>{tasks.length}</b></span></div>
+    <div className="inventory-note"><span>◉</span><div><b>第一阶段：只做本地登记与人工录入</b><small>不做自动定时抓取、不绕过登录/会员/付费墙、不接第三方爬虫与 AI API；URL 仅作为人工核对入口保存。</small></div></div>
+    <h3 className="recipe-subtitle">数据源</h3>
+    <div className="recipe-sources">{sources.map((item) => <article className="recipe-source-card" key={item.id}><div><b>{item.name}</b><small>{item.website}</small></div><span className="recipe-badge">{item.sourceType}</span><span className="recipe-badge ok">{item.status}</span><span className="recipe-badge warn">{item.riskLevel}</span><small className="recipe-note">{item.notes}</small></article>)}</div>
+    <h3 className="recipe-subtitle">配方来源 URL</h3>
+    <div className="recipe-toolbar"><select value={activeSource?.id ?? ''} onChange={(event) => setSourceId(event.target.value)}>{sources.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select><label className="catalog-search"><span>↗</span><input value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="粘贴公开配方页面 URL" /></label><button className="primary-button" onClick={createTask}>创建采集任务</button><button className="secondary-button" onClick={importTestRecipe} disabled={!testTemplate}>导入测试配方</button></div>
+    <h3 className="recipe-subtitle">最近采集任务（{tasks.length}）</h3>
+    {tasks.length ? <div className="catalog-table"><div className="catalog-table-head"><span>任务</span><span>来源</span><span>URL</span><span>状态</span><span>操作</span></div>{tasks.slice(0, 8).map((task) => <article className="catalog-row" key={task.id}><div className="catalog-product"><b>{task.id}</b><small>{task.createdAt} · {task.note}</small></div><span className="catalog-category">{task.sourceName}</span><span className="catalog-origin">{task.url}</span><span className="stock-status"><i />{task.status}</span><div className="catalog-actions"><select value={task.status} onChange={(event) => setTaskStatus(task.id, event.target.value)}>{collectionTaskStatuses.map((status) => <option key={status}>{status}</option>)}</select></div></article>)}</div> : <div className="empty-catalog"><span>⌕</span><b>暂无采集任务</b><small>填写公开来源 URL 后点击「创建采集任务」。</small></div>}
+    <h3 className="recipe-subtitle">待审核配方（{pendingRecipes.length}）</h3>
+    {pendingRecipes.length ? <div className="recipe-pending"><div className="recipe-pending-head"><span>配方名称</span><span>产品类型</span><span>来源</span><span>专业度</span><span>完整度</span><span>匹配</span><span>状态</span><span>操作</span></div>{pendingRecipes.map((recipe) => <div className="recipe-pending-row" key={recipe.id}><b>{recipe.name}</b><small>{recipe.productType || '—'}</small><small><a href={recipe.sourceUrl} target="_blank" rel="noreferrer">{recipe.sourceName}</a></small><small>{recipe.professionalLevel}</small><small>{recipe.dataCompleteness}%</small><small>{matchRecipeProducts(state, recipe).length} 个</small><small>{recipe.reviewStatus}</small><div className="recipe-row-actions"><button className="secondary-button" onClick={() => { setDetail(recipe); setReviewNote('') }}>查看</button><button className="primary-button" onClick={() => reviewRecipe(recipe, '已通过', true)}>通过</button><button className="secondary-button" onClick={() => reviewRecipe(recipe, '已驳回', true)}>驳回</button></div></div>)}</div> : <div className="empty-catalog"><span>⌕</span><b>暂无待审核配方</b><small>可点击「导入测试配方」生成一条测试数据。</small></div>}
+    {notice && <div className="toast">✓ {notice}</div>}
+  </div>
+}
+
 function AICollectionCenter({ onBack }: { onBack: () => void }) {
   const { state, dispatch } = useAppStore()
   const [keyword, setKeyword] = useState('')
@@ -1212,6 +1308,7 @@ function AICollectionCenter({ onBack }: { onBack: () => void }) {
       {state.leadCandidates.map((lead) => <article className="catalog-row" key={lead.id}><span className="catalog-category">客户</span><div className="catalog-product"><b>{lead.company}</b><small>行业: {lead.industry || '待确认'} · 官网: {lead.website || '待确认'} · 评分: {lead.intentScore ?? 0}</small></div><span className="catalog-origin">{lead.needs || '需求待确认'}</span><span className="stock-status"><i />待确认</span><div className="catalog-actions"><button onClick={() => confirmLead(lead)}>确认并导入客户 <span>→</span></button><button onClick={() => dispatch({ type: 'REMOVE_LEAD_CANDIDATE', payload: { id: lead.id } })}>删除</button></div></article>)}
       {state.productDrafts.length === 0 && state.leadCandidates.length === 0 && <div className="empty-catalog"><span>⌕</span><b>暂无候选</b><small>输入关键词或公司名称生成候选资料。</small></div>}
     </div>
+    <RecipeCollectionPanel />
   </div>
 }
 
